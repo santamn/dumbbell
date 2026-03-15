@@ -9,6 +9,8 @@ rand = "0.10.0"
 rand_distr = "0.6.0"
 rayon = "1.11.0"
 itertools = "0.14.0"
+egui = "0.33.3"
+eframe = "0.33.3"
 
 [profile.release]
 lto = "fat"
