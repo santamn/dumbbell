@@ -1,25 +1,23 @@
 use crate::simulation::{Particle, Real, STEPS, omega};
-use eframe::egui::{
-    self, CentralPanel, Color32, Context, Pos2, Rect, Sense, Stroke, TopBottomPanel,
-};
+use eframe::egui::{CentralPanel, Color32, Context, Pos2, Rect, Sense, Stroke, TopBottomPanel};
 use nalgebra::{Point2, Vector2};
 use rand::{SeedableRng, rngs::SmallRng};
 use std::cell::OnceCell;
 use std::f64::consts::TAU;
 use std::ops::Range;
 
+const BOUNDARY_SAMPLING_STRIDE: Real = 0.001;
 const LOCAL_MINIUM_POINT: Real = -0.190359162688;
 const Y_MAX: Real = 2.23;
 const Y_MIN: Real = -2.23;
-const BOUNDARY_SAMPLING_STRIDE: Real = 0.001;
 
 /// シミュレーションの可視化を管理するアプリケーション構造体
 pub struct SimApp {
     boundary: OnceCell<(Vec<Pos2>, Vec<Pos2>)>, // チャネルの境界線
-    current_step: usize,                        // 現在のシミュレーション内部ステップ
-    particle: Particle<SmallRng>,               // 粒子軌跡を逐次生成するイテレータ
+    current_step: usize,                        // 現在のシミュレーションステップ
+    particle: Particle<SmallRng>,               // 粒子の軌跡を逐次生成するイテレータ
     running: bool,                              // アニメーションが進行中かどうか
-    sample_stride: usize,                       // 1フレームで進める内部ステップ数
+    sample_stride: usize,                       // 1フレームで進めるステップ数
     trail: Vec<Pos2>,                           // 粒子の軌跡を保存するバッファ
     x_range: Range<Real>,                       // 描画するx座標の範囲
 }
@@ -64,20 +62,23 @@ impl eframe::App for SimApp {
                 .nth((self.sample_stride - 1).min(self.current_step))
                 .unwrap();
         }
-        let state = self.particle.now().unwrap();
+        let state = self.particle.now();
 
         // 現在のシミュレーションの状態を表示するUIパネルを上部に配置
         TopBottomPanel::top("controls").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let button_label = if self.running { "Pause" } else { "Start" };
-                if ui.button(button_label).clicked() {
+                if ui
+                    .button(if self.running { "Pause" } else { "Start" })
+                    .clicked()
+                {
                     self.running = !self.running;
                 }
                 ui.separator();
                 ui.label(format!("step = {} / {}", self.current_step, STEPS));
                 ui.label(format!(
                     "force = ({:.3}, {:.3})",
-                    self.particle.force.x, self.particle.force.y
+                    self.particle.force().x,
+                    self.particle.force().y
                 ));
                 ui.label(format!(
                     "position = ({:.4} {:.4})",
@@ -115,7 +116,7 @@ impl eframe::App for SimApp {
                 painter.line_segment([window[0], window[1]], stroke_wall);
             });
 
-            // 軌跡は履歴バッファを細線で連結して表示する
+            // 軌跡の描画
             if self.running {
                 self.trail.push(self.screen_position(rect, state.position));
             }
@@ -125,9 +126,7 @@ impl eframe::App for SimApp {
             });
 
             // 粒子の描画
-            let (s, c) = state.angle.sin_cos();
-            let h = 0.5 * self.particle.length * Vector2::new(c, s);
-            let (p1, p2) = (state.position + h, state.position - h);
+            let (p1, p2) = self.particle.endpoints();
             // 棒
             painter.line_segment(
                 [
@@ -147,10 +146,10 @@ impl eframe::App for SimApp {
         if self.running {
             if self.current_step < STEPS {
                 self.current_step += self.sample_stride;
+                ctx.request_repaint();
             } else {
                 self.running = false;
             }
         }
-        ctx.request_repaint();
     }
 }

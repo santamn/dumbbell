@@ -22,16 +22,29 @@ const fn const_sqrt(x: Real) -> Real {
     guess
 }
 
-const PI_SQUARED: Real = PI * PI;
-
 const K: Real = 1.5e6; //                              壁の反発力の強さ
 const TIME: Real = 10.0; //                            総シミュレーションの時間
 const DELTA_T: Real = 2e-7; //                         シミュレーションの時間刻み
 const NOISE_SCALE: Real = const_sqrt(DELTA_T); //      ブラウン運動のノイズのスケール
 pub const STEPS: usize = (TIME / DELTA_T) as usize; // シミュレーションの総ステップ数
 
-#[derive(Debug, Clone, Copy)]
+// チャネルの境界を表すトレイトと、その実装としての天井と床の構造体
+trait Wall {
+    const SIGN: Real; // 壁の上下を表す定数（上壁: 1, 下壁: -1）
+}
+
+struct Ceiling;
+impl Wall for Ceiling {
+    const SIGN: Real = 1.0;
+}
+
+struct Floor;
+impl Wall for Floor {
+    const SIGN: Real = -1.0;
+}
+
 /// 粒子の状態を表す構造体
+#[derive(Debug, Clone, Copy)]
 pub struct State {
     pub position: Point2<Real>,
     pub angle: Real,
@@ -59,40 +72,39 @@ impl Add<(Vector2<Real>, Real)> for State {
     }
 }
 
-trait Wall {
-    const SIGN: Real; // 壁の上下を表す定数（上壁: 1, 下壁: -1）
-}
-
-struct Ceiling;
-impl Wall for Ceiling {
-    const SIGN: Real = 1.0;
-}
-
-struct Floor;
-impl Wall for Floor {
-    const SIGN: Real = -1.0;
-}
-
 /// 粒子を表す構造体。内部で乱数生成器を保持し、イテレータとして粒子の軌跡を逐次生成する
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Particle<R: Rng> {
     rng: R,
-    pub length: Real,
-    pub force: Vector2<Real>,
-    state: Option<State>,
+    is_first: bool,
+    length: Real,
+    force: Vector2<Real>,
+    state: State,
 }
 
 impl<R: Rng> Particle<R> {
-    pub fn new(rng: R, length: Real, force: Vector2<Real>) -> Self {
+    pub fn new(mut rng: R, length: Real, force: Vector2<Real>) -> Self {
+        let state = State::new(&mut rng, length);
         Self {
             rng,
+            is_first: true,
             length,
             force,
-            state: None,
+            state,
         }
     }
 
-    pub fn now(&self) -> Option<State> {
+    pub fn endpoints(&self) -> (Point2<Real>, Point2<Real>) {
+        let (s, c) = self.state.angle.sin_cos();
+        let h = 0.5 * self.length * Vector2::new(c, s);
+        (self.state.position + h, self.state.position - h)
+    }
+
+    pub fn force(&self) -> Vector2<Real> {
+        self.force
+    }
+
+    pub fn now(&self) -> State {
         self.state
     }
 }
@@ -101,30 +113,28 @@ impl<R: Rng> Iterator for Particle<R> {
     type Item = State;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.state = Some(match self.state {
-            None => State::new(&mut self.rng, self.length),
-            Some(state) => {
-                let xi_x = self.rng.sample(StandardNormal);
-                let xi_y = self.rng.sample(StandardNormal);
-                let xi_phi = self.rng.sample::<Real, _>(StandardNormal);
+        if self.is_first {
+            self.is_first = false;
+            return Some(self.state);
+        }
 
-                let (s, c) = state.angle.sin_cos();
-                let e_phi = Vector2::new(-s, c);
-                let h = 0.5 * self.length * Vector2::new(c, s);
-                let (p1, p2) = (state.position + h, state.position - h);
-                let (rep1, rep2) = (repulsion(&p1), repulsion(&p2));
+        let xi_x = self.rng.sample(StandardNormal);
+        let xi_y = self.rng.sample(StandardNormal);
+        let xi_phi = self.rng.sample::<Real, _>(StandardNormal);
 
-                state
-                    + (
-                        (self.force + 0.5 * (rep1 + rep2)) * DELTA_T
-                            + Vector2::new(xi_x, xi_y) * NOISE_SCALE,
-                        ((rep1 - rep2).dot(&e_phi) * DELTA_T + 2.0 * xi_phi * NOISE_SCALE)
-                            / self.length,
-                    )
-            }
-        });
+        let (s, c) = self.state.angle.sin_cos();
+        let h = 0.5 * self.length * Vector2::new(c, s);
+        let e_phi = Vector2::new(-s, c);
+        let (p1, p2) = (self.state.position + h, self.state.position - h);
+        let (f1, f2) = (repulsion(&p1), repulsion(&p2));
 
-        self.state
+        self.state = self.state
+            + (
+                (self.force + 0.5 * (f1 + f2)) * DELTA_T + Vector2::new(xi_x, xi_y) * NOISE_SCALE,
+                ((f1 - f2).dot(&e_phi) * DELTA_T + 2.0 * xi_phi * NOISE_SCALE) / self.length,
+            );
+
+        Some(self.state)
     }
 }
 
@@ -172,8 +182,8 @@ fn omega_derivative(x: Real) -> Real {
 }
 
 #[inline]
-/// omega"(x) = -4π^2sin(2πx) - 4π^2sin(4πx) = -4π^2sin(2πx)(1 + 2cos(2πx))
+/// omega"(x) = -4π^2sin(2πx) - 4π^2sin(4πx) = -(2π)^2sin(2πx)(1 + 2cos(2πx))
 fn omega_derivative_second(x: Real) -> Real {
     let (s, c) = (TAU * x).sin_cos();
-    -4.0 * PI_SQUARED * s * (1.0 + 2.0 * c)
+    -TAU * TAU * s * (1.0 + 2.0 * c)
 }

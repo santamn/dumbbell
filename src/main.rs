@@ -7,7 +7,7 @@ mod renderer;
 mod simulation;
 
 fn main() {
-    run_animation(0, 1000, 0.0..13.0, 0.08, Vector2::new(5.0, 0.0));
+    run_animation(0, 1000, 0.0..12.0, 0.08, Vector2::new(5.0, 0.0));
 }
 
 #[allow(dead_code)]
@@ -32,6 +32,8 @@ fn run_animation(
         Box::new(|_| Ok(Box::new(app))),
     )
     .expect("eframe failed to start");
+
+    std::process::exit(0);
 }
 
 #[allow(dead_code)]
