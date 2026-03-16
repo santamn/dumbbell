@@ -24,10 +24,11 @@ const fn const_sqrt(x: Real) -> Real {
 
 const PI_SQUARED: Real = PI * PI;
 
-pub const TIME: Real = 10.0; //                        総シミュレーションの時間       10.0
-pub const DELTA_T: Real = 2e-7; //                     シミュレーションの時間刻み     2.0×10^-7
-pub const NOISE_SCALE: Real = const_sqrt(DELTA_T); //  ブラウン運動のノイズのスケール
-pub const STEPS: usize = (TIME / DELTA_T) as usize; // シミュレーションの総ステップ数  5.0×10^7
+const K: Real = 1.5e6; //                              壁の反発力の強さ
+const TIME: Real = 10.0; //                            総シミュレーションの時間
+const DELTA_T: Real = 2e-7; //                         シミュレーションの時間刻み
+const NOISE_SCALE: Real = const_sqrt(DELTA_T); //      ブラウン運動のノイズのスケール
+pub const STEPS: usize = (TIME / DELTA_T) as usize; // シミュレーションの総ステップ数
 
 #[derive(Debug, Clone, Copy)]
 /// 粒子の状態を表す構造体
@@ -72,16 +73,16 @@ impl Wall for Floor {
     const SIGN: Real = -1.0;
 }
 
-/// 粒子の軌跡を逐次生成するイテレータ
+/// 粒子を表す構造体。内部で乱数生成器を保持し、イテレータとして粒子の軌跡を逐次生成する
 #[derive(Debug, Clone)]
-pub struct Trajectory<R: Rng> {
+pub struct Particle<R: Rng> {
     rng: R,
     pub length: Real,
     pub force: Vector2<Real>,
     state: Option<State>,
 }
 
-impl<R: Rng> Trajectory<R> {
+impl<R: Rng> Particle<R> {
     pub fn new(rng: R, length: Real, force: Vector2<Real>) -> Self {
         Self {
             rng,
@@ -90,9 +91,13 @@ impl<R: Rng> Trajectory<R> {
             state: None,
         }
     }
+
+    pub fn now(&self) -> Option<State> {
+        self.state
+    }
 }
 
-impl<R: Rng> Iterator for Trajectory<R> {
+impl<R: Rng> Iterator for Particle<R> {
     type Item = State;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -125,8 +130,6 @@ impl<R: Rng> Iterator for Trajectory<R> {
 
 /// 壁への沈み込みに対する反発力
 fn repulsion(point: &Point2<Real>) -> Vector2<Real> {
-    const K: Real = 1.5e6;
-
     K * if point.y > omega(point.x) {
         perpendicular_foot::<Ceiling>(point) - point
     } else if point.y < -omega(point.x) {

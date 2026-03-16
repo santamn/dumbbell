@@ -7,7 +7,7 @@ mod renderer;
 mod simulation;
 
 fn main() {
-    run_animation(0, 1000, -1.0..3.0, 0.08, Vector2::new(1.0, 0.0));
+    run_animation(0, 1000, 0.0..13.0, 0.08, Vector2::new(5.0, 0.0));
 }
 
 #[allow(dead_code)]
@@ -32,4 +32,9 @@ fn run_animation(
         Box::new(|_| Ok(Box::new(app))),
     )
     .expect("eframe failed to start");
+}
+
+#[allow(dead_code)]
+fn ensemble_average() {
+    todo!("アンサンブル平均により、粒子の位置分布を推定する機能を実装する予定")
 }

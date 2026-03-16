@@ -1,4 +1,4 @@
-use crate::simulation::{Real, STEPS, Trajectory, omega};
+use crate::simulation::{Particle, Real, STEPS, omega};
 use eframe::egui::{
     self, CentralPanel, Color32, Context, Pos2, Rect, Sense, Stroke, TopBottomPanel,
 };
@@ -17,9 +17,10 @@ const BOUNDARY_SAMPLING_STRIDE: Real = 0.001;
 pub struct SimApp {
     boundary: OnceCell<(Vec<Pos2>, Vec<Pos2>)>, // チャネルの境界線
     current_step: usize,                        // 現在のシミュレーション内部ステップ
+    particle: Particle<SmallRng>,               // 粒子軌跡を逐次生成するイテレータ
+    running: bool,                              // アニメーションが進行中かどうか
     sample_stride: usize,                       // 1フレームで進める内部ステップ数
     trail: Vec<Pos2>,                           // 粒子の軌跡を保存するバッファ
-    trajectory_iter: Trajectory<SmallRng>,      // 粒子軌跡を逐次生成するイテレータ
     x_range: Range<Real>,                       // 描画するx座標の範囲
 }
 
@@ -34,9 +35,10 @@ impl SimApp {
         Self {
             boundary: OnceCell::new(),
             current_step: 0,
+            particle: Particle::new(SmallRng::seed_from_u64(seed), rod_length, force),
+            running: true,
             sample_stride,
             trail: Vec::with_capacity(STEPS / sample_stride + 1),
-            trajectory_iter: Trajectory::new(SmallRng::seed_from_u64(seed), rod_length, force),
             x_range: (x_range.start - LOCAL_MINIUM_POINT).floor() + LOCAL_MINIUM_POINT
                 ..(x_range.end - LOCAL_MINIUM_POINT).ceil() + LOCAL_MINIUM_POINT,
         }
@@ -57,18 +59,25 @@ impl eframe::App for SimApp {
     /// 毎フレームのUI更新。入力反映と描画を担当する
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         // シミュレーションの状態をsample_stride分だけ進める
-        let state = self
-            .trajectory_iter
-            .nth((self.sample_stride - 1).min(self.current_step))
-            .unwrap();
+        if self.running {
+            self.particle
+                .nth((self.sample_stride - 1).min(self.current_step))
+                .unwrap();
+        }
+        let state = self.particle.now().unwrap();
 
         // 現在のシミュレーションの状態を表示するUIパネルを上部に配置
         TopBottomPanel::top("controls").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                let button_label = if self.running { "Pause" } else { "Start" };
+                if ui.button(button_label).clicked() {
+                    self.running = !self.running;
+                }
+                ui.separator();
                 ui.label(format!("step = {} / {}", self.current_step, STEPS));
                 ui.label(format!(
                     "force = ({:.3}, {:.3})",
-                    self.trajectory_iter.force.x, self.trajectory_iter.force.y
+                    self.particle.force.x, self.particle.force.y
                 ));
                 ui.label(format!(
                     "position = ({:.4} {:.4})",
@@ -107,7 +116,9 @@ impl eframe::App for SimApp {
             });
 
             // 軌跡は履歴バッファを細線で連結して表示する
-            self.trail.push(self.screen_position(rect, state.position));
+            if self.running {
+                self.trail.push(self.screen_position(rect, state.position));
+            }
             let stroke_trail = Stroke::new(1.0, Color32::from_rgb(255, 170, 90));
             self.trail.windows(2).for_each(|window| {
                 painter.line_segment([window[0], window[1]], stroke_trail);
@@ -115,7 +126,7 @@ impl eframe::App for SimApp {
 
             // 粒子の描画
             let (s, c) = state.angle.sin_cos();
-            let h = 0.5 * self.trajectory_iter.length * Vector2::new(c, s);
+            let h = 0.5 * self.particle.length * Vector2::new(c, s);
             let (p1, p2) = (state.position + h, state.position - h);
             // 棒
             painter.line_segment(
@@ -133,9 +144,13 @@ impl eframe::App for SimApp {
             );
         });
 
-        if self.current_step < STEPS {
-            self.current_step += self.sample_stride;
-            ctx.request_repaint();
+        if self.running {
+            if self.current_step < STEPS {
+                self.current_step += self.sample_stride;
+            } else {
+                self.running = false;
+            }
         }
+        ctx.request_repaint();
     }
 }
