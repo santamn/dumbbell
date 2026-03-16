@@ -38,7 +38,7 @@ pub struct State {
 
 impl State {
     pub fn new<R: Rng>(rng: &mut R, length: Real) -> Self {
-        let x = rng.random_range(-0.190359162688..0.8096408373123332);
+        let x = rng.random_range(-0.1..0.7);
         let limit = omega(&x) - length * 0.5;
         Self {
             position: Point2::new(x, rng.random_range(-limit..limit)),
