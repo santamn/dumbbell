@@ -39,7 +39,7 @@ pub struct State {
 impl State {
     pub fn new<R: Rng>(rng: &mut R, length: Real) -> Self {
         let x = rng.random_range(-0.1..0.7);
-        let limit = omega(&x) - length * 0.5;
+        let limit = omega(x) - length * 0.5;
         Self {
             position: Point2::new(x, rng.random_range(-limit..limit)),
             angle: rng.random_range(0.0..TAU),
@@ -127,9 +127,9 @@ impl<R: Rng> Iterator for Trajectory<R> {
 fn repulsion(point: &Point2<Real>) -> Vector2<Real> {
     const K: Real = 1.5e6;
 
-    K * if point.y > omega(&point.x) {
+    K * if point.y > omega(point.x) {
         perpendicular_foot::<Ceiling>(point) - point
-    } else if point.y < -omega(&point.x) {
+    } else if point.y < -omega(point.x) {
         perpendicular_foot::<Floor>(point) - point
     } else {
         Vector2::zeros()
@@ -138,7 +138,7 @@ fn repulsion(point: &Point2<Real>) -> Vector2<Real> {
 
 /// 点から壁への垂線の足を求める関数
 fn perpendicular_foot<W: Wall>(point: &Point2<Real>) -> Point2<Real> {
-    std::iter::successors(Some(point.x), |x| {
+    std::iter::successors(Some(point.x), |&x| {
         let h = W::SIGN * omega(x) - point.y;
         let p = W::SIGN * omega_derivative(x);
 
@@ -150,27 +150,27 @@ fn perpendicular_foot<W: Wall>(point: &Point2<Real>) -> Point2<Real> {
     })
     .take(1000) // 1000回の更新で収束しない場合は諦める
     .last()
-    .map(|x| Point2::new(x, W::SIGN * omega(&x)))
+    .map(|x| Point2::new(x, W::SIGN * omega(x)))
     .unwrap_or(*point)
 }
 
 #[inline]
 /// omega(x) = sin(2πx) + 0.25sin(4πx) + 1.12 = sin(2πx) + 0.5sin(2πx)cos(2πx) + 1.12
-pub fn omega(x: &Real) -> Real {
+pub fn omega(x: Real) -> Real {
     let (s, c) = (TAU * x).sin_cos();
     s + 0.5 * s * c + 1.12
 }
 
 #[inline]
 /// omega'(x) = 2πcos(2πx) + πcos(4πx) = 2πcos(2πx)(cos(2πx) + 1) - π
-fn omega_derivative(x: &Real) -> Real {
+fn omega_derivative(x: Real) -> Real {
     let c = (TAU * x).cos();
     TAU * c * (c + 1.0) - PI
 }
 
 #[inline]
 /// omega"(x) = -4π^2sin(2πx) - 4π^2sin(4πx) = -4π^2sin(2πx)(1 + 2cos(2πx))
-fn omega_derivative_second(x: &Real) -> Real {
+fn omega_derivative_second(x: Real) -> Real {
     let (s, c) = (TAU * x).sin_cos();
     -4.0 * PI_SQUARED * s * (1.0 + 2.0 * c)
 }

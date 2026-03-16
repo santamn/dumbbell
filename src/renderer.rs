@@ -1,6 +1,6 @@
 use crate::simulation::{Real, STEPS, Trajectory, omega};
 use eframe::egui::{
-    self, CentralPanel, Color32, Context, Pos2, Rect, Sense, Shape, Stroke, TopBottomPanel,
+    self, CentralPanel, Color32, Context, Pos2, Rect, Sense, Stroke, TopBottomPanel,
 };
 use nalgebra::{Point2, Vector2};
 use rand::{SeedableRng, rngs::SmallRng};
@@ -88,7 +88,7 @@ impl eframe::App for SimApp {
                 (0..=((self.x_range.end - self.x_range.start) / BOUNDARY_SAMPLING_STRIDE) as usize)
                     .map(|i| {
                         let x = self.x_range.start + i as Real * BOUNDARY_SAMPLING_STRIDE;
-                        let y = omega(&x);
+                        let y = omega(x);
                         (
                             self.screen_position(rect, Point2::new(x, y)),
                             self.screen_position(rect, Point2::new(x, -y)),
@@ -99,17 +99,19 @@ impl eframe::App for SimApp {
 
             // 上下の境界線の描画
             let stroke_wall = Stroke::new(1.4, Color32::from_rgb(120, 180, 220));
-            painter.add(Shape::line(upper_boundary.clone(), stroke_wall));
-            painter.add(Shape::line(lower_boundary.clone(), stroke_wall));
+            upper_boundary.windows(2).for_each(|window| {
+                painter.line_segment([window[0], window[1]], stroke_wall);
+            });
+            lower_boundary.windows(2).for_each(|window| {
+                painter.line_segment([window[0], window[1]], stroke_wall);
+            });
 
             // 軌跡は履歴バッファを細線で連結して表示する
             self.trail.push(self.screen_position(rect, state.position));
-            if self.trail.len() >= 2 {
-                painter.add(Shape::line(
-                    self.trail.clone(),
-                    Stroke::new(1.0, Color32::from_rgb(255, 170, 90)),
-                ));
-            }
+            let stroke_trail = Stroke::new(1.0, Color32::from_rgb(255, 170, 90));
+            self.trail.windows(2).for_each(|window| {
+                painter.line_segment([window[0], window[1]], stroke_trail);
+            });
 
             // 粒子の描画
             let (s, c) = state.angle.sin_cos();
