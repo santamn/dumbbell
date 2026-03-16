@@ -17,10 +17,10 @@ fn main() {
         Box::new(|_| {
             Ok(Box::new(renderer::SimApp::new(
                 0,
-                500,
-                0.0..10.0,
+                1000,
+                -1.0..3.0,
                 0.04,
-                Vector2::new(100.0, 0.0),
+                Vector2::new(1.0, 0.0),
             )))
         }),
     )

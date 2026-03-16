@@ -5,6 +5,7 @@ use eframe::egui::{
 use nalgebra::{Point2, Vector2};
 use rand::{SeedableRng, rngs::SmallRng};
 use std::cell::OnceCell;
+use std::f64::consts::TAU;
 use std::ops::Range;
 
 const LOCAL_MINIUM_POINT: Real = -0.190359162688;
@@ -42,12 +43,13 @@ impl SimApp {
     }
 
     /// シミュレーション上の座標を表示画面上の座標系に変換する
-    /// FIXME: 座標の原点ではなく、描画されるグラフの中心を画面の真ん中に置く
     fn screen_position(&self, rect: Rect, point: Point2<Real>) -> Pos2 {
         let real_w = (self.x_range.end - self.x_range.start) as f32;
         let real_h = (Y_MAX - Y_MIN) as f32;
         let scale = (rect.width() / real_w).min(rect.height() / real_h);
-        rect.center() + egui::vec2(point.x as f32, point.y as f32) * scale
+
+        let center_x = 0.5 * (self.x_range.start + self.x_range.end) as f32;
+        rect.center() + egui::vec2(point.x as f32 - center_x, point.y as f32) * scale
     }
 }
 
@@ -72,7 +74,7 @@ impl eframe::App for SimApp {
                     "position = ({:.4} {:.4})",
                     state.position.x, state.position.y
                 ));
-                ui.label(format!("Φ = {}", state.angle));
+                ui.label(format!("Φ = {:.4} [rad]", state.angle.rem_euclid(TAU)));
             });
         });
 
@@ -113,17 +115,19 @@ impl eframe::App for SimApp {
             let (s, c) = state.angle.sin_cos();
             let h = 0.5 * self.trajectory_iter.length * Vector2::new(c, s);
             let (p1, p2) = (state.position + h, state.position - h);
-            painter.circle_filled(
-                self.screen_position(rect, state.position),
-                3.0,
-                Color32::WHITE,
-            );
+            // 棒
             painter.line_segment(
                 [
                     self.screen_position(rect, p1),
                     self.screen_position(rect, p2),
                 ],
                 Stroke::new(3.0, Color32::from_rgb(230, 90, 60)),
+            );
+            // 粒子の中心
+            painter.circle_filled(
+                self.screen_position(rect, state.position),
+                1.5,
+                Color32::WHITE,
             );
         });
 

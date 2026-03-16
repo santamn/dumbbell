@@ -137,7 +137,6 @@ fn repulsion(point: &Point2<Real>) -> Vector2<Real> {
 }
 
 /// 点から壁への垂線の足を求める関数
-/// FIXME: 不安定な場合がありそう
 fn perpendicular_foot<W: Wall>(point: &Point2<Real>) -> Point2<Real> {
     std::iter::successors(Some(point.x), |x| {
         let h = W::SIGN * omega(x) - point.y;
@@ -149,6 +148,7 @@ fn perpendicular_foot<W: Wall>(point: &Point2<Real>) -> Point2<Real> {
 
         (d.abs() > Real::EPSILON).then_some(x - d)
     })
+    .take(1000) // 1000回の更新で収束しない場合は諦める
     .last()
     .map(|x| Point2::new(x, W::SIGN * omega(&x)))
     .unwrap_or(*point)
