@@ -38,7 +38,10 @@
       "version": "1.94.0"
     },
     "ghcr.io/devcontainers/features/nvidia-cuda:3": {
-      "installCudnn": true
+      "installCudnn": true,
+      "installToolkit": true,
+      "installCudnnDev": true,
+      "cudaVersion": "12.6"
     },
     "ghcr.io/devcontainers-extra/features/apt-packages:1": {
       "packages": "build-essential, clang, mold, gnuplot"
@@ -46,15 +49,20 @@
   },
   "runArgs": ["--device=nvidia.com/gpu=all", "--memory=60gb"],
   "containerUser": "miyake",
-  "remoteUser": "root",
   "postCreateCommand": "cargo fetch",
   "containerEnv": {
     "CARGO_TERM_COLOR": "always",
-    "SSH_AUTH_SOCK": "/ssh-agent"
+    "SSH_AUTH_SOCK": "/ssh-agent",
+    "CUDA_VISIBLE_DEVICES": "1,2,3"
+  },
+  "remoteEnv": {
+    "PATH": "/usr/local/cuda/bin:${containerEnv:PATH}",
+    "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:${containerEnv:LD_LIBRARY_PATH}"
   },
   "customizations": {
     "vscode": {
       "extensions": [
+        "ms-vscode.cpptools",
         "rust-lang.rust-analyzer",
         "vadimcn.vscode-lldb",
         "tamasfe.even-better-toml",

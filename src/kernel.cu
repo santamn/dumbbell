@@ -2,6 +2,7 @@
 #include <curand_kernel.h>
 #include <math.h>
 #include <iostream>
+#include <stdint.h>
 
 #define DELTA_T 2e-7
 #define K 1.5e6
