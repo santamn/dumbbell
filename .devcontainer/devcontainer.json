@@ -44,9 +44,6 @@
       "packages": "build-essential, clang, mold, gnuplot"
     }
   },
-  "hostRequirements": {
-    "gpu": true
-  },
   "runArgs": ["--device=nvidia.com/gpu=all", "--memory=60gb"],
   "containerUser": "miyake",
   "remoteUser": "root",
