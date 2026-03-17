@@ -11,6 +11,7 @@
 #define TAU (2.0 * PI)
 #define NOISE_SCALE sqrt(DELTA_T)
 
+// __device__ は「GPU上で実行され、GPUからのみ呼び出せる関数」を意味する
 __device__ double omega(double x)
 {
   double s = sin(TAU * x);
@@ -58,14 +59,14 @@ __device__ void repulsion(double px, double py, double *fx, double *fy)
   if (py > current_omega)
   {
     double f_x = perpendicular_foot_x(px, py, 1.0);
-    double f_y = 1.0 * omega(f_x);
+    double f_y = omega(f_x);
     *fx = K * (f_x - px);
     *fy = K * (f_y - py);
   }
   else if (py < -current_omega)
   {
     double f_x = perpendicular_foot_x(px, py, -1.0);
-    double f_y = -1.0 * omega(f_x);
+    double f_y = -omega(f_x);
     *fx = K * (f_x - px);
     *fy = K * (f_y - py);
   }
@@ -76,6 +77,7 @@ __device__ void repulsion(double px, double py, double *fx, double *fy)
   }
 }
 
+// __global__: CPUから呼び出せて、GPUで実行される関数（カーネル）
 __global__ void simulate_particles(
     unsigned long long seed,
     double length,
@@ -85,13 +87,19 @@ __global__ void simulate_particles(
     double *out_displacement,
     double *out_square_displacement)
 {
+  // 1. 自分のスレッド番号（担当する粒子のID）を求める
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  // スレッド数がアンサンブル数を超えた場合は何もしない（端数処理）
   if (idx >= global_size)
     return;
 
+  // 2. 乱数生成器の初期化
   curandState state;
+  // 同じシードでも、スレッドID(idx)を渡すことで、全スレッドが異なる乱数列を生成します
   curand_init(seed, idx, 0, &state);
 
+  // 3. 粒子の初期状態の決定
   double x = (curand_uniform_double(&state) * 0.8) - 0.1;
   double limit = omega(x) - length * 0.5;
   double y = (curand_uniform_double(&state) * 2.0 * limit) - limit;
@@ -99,12 +107,15 @@ __global__ void simulate_particles(
 
   double start_x = x;
 
+  // 4. シミュレーションのメインループ（これが数千万回実行される）
   for (uint64_t t = 0; t < steps; ++t)
   {
+    // ブラウン運動用の正規分布ノイズを生成
     double xi_x = curand_normal_double(&state);
     double xi_y = curand_normal_double(&state);
     double xi_phi = curand_normal_double(&state);
 
+    // CUDA組み込み関数 sincos を使うと sin と cos を同時に高速計算できる
     double s, c;
     sincos(angle, &s, &c);
 
@@ -113,17 +124,20 @@ __global__ void simulate_particles(
     double e_phi_x = -s;
     double e_phi_y = c;
 
+    // 棒の両端の座標
     double p1_x = x + h_x;
     double p1_y = y + h_y;
     double p2_x = x - h_x;
     double p2_y = y - h_y;
 
+    // 壁からの反発力を計算
     double f1_x, f1_y;
     repulsion(p1_x, p1_y, &f1_x, &f1_y);
 
     double f2_x, f2_y;
     repulsion(p2_x, p2_y, &f2_x, &f2_y);
 
+    // オイラー・丸山法による位置と角度の更新
     x += (force_x + 0.5 * (f1_x + f2_x)) * DELTA_T + xi_x * NOISE_SCALE;
     y += (0.5 * (f1_y + f2_y)) * DELTA_T + xi_y * NOISE_SCALE;
 
@@ -134,12 +148,17 @@ __global__ void simulate_particles(
     angle += (dot_prod * DELTA_T + 2.0 * xi_phi * NOISE_SCALE) / length;
   }
 
+  // 5. 最終的な変位を計算
   double delta_x = x - start_x;
 
+  // 6. 結果の集計（アトミック演算）
+  // 数万スレッドが同時に out_displacement に足し算をするとデータが壊れるため、
+  // atomicAdd を使って「1スレッドずつ順番に足し算」させます。
   atomicAdd(out_displacement, delta_x);
   atomicAdd(out_square_displacement, delta_x * delta_x);
 }
 
+// extern "C" にすることで、C++特有の名前修飾（マングリング）を防ぎ、Rustから呼び出せるようにします
 extern "C"
 {
   void run_simulation_cuda(
@@ -152,8 +171,10 @@ extern "C"
       double *total_displacement,
       double *total_square_displacement)
   {
+    // 対象のGPUデバイスを選択
     cudaSetDevice(device_id);
 
+    // GPU上のメモリ領域を確保し、0で初期化
     double *d_out_disp;
     double *d_out_sq_disp;
     cudaMalloc(&d_out_disp, sizeof(double));
@@ -161,20 +182,28 @@ extern "C"
     cudaMemset(d_out_disp, 0, sizeof(double));
     cudaMemset(d_out_sq_disp, 0, sizeof(double));
 
+    // CUDAの実行構成（ブロックとスレッド）の決定
+    // 256スレッドを1グループ(ブロック)とし、必要なブロック数を計算します
     int threads = 256;
     int blocks = (ensemble_size + threads - 1) / threads;
 
+    // カーネル（GPU関数）を起動
     simulate_particles<<<blocks, threads>>>(seed, length, force_x, steps, ensemble_size, d_out_disp, d_out_sq_disp);
+
+    // GPUの計算がすべて終わるまでCPUを待機させる
     cudaDeviceSynchronize();
 
+    // GPU上で計算した結果を、CPU側（ホスト側）の変数にコピーして持ってくる
     double h_out_disp = 0;
     double h_out_sq_disp = 0;
     cudaMemcpy(&h_out_disp, d_out_disp, sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(&h_out_sq_disp, d_out_sq_disp, sizeof(double), cudaMemcpyDeviceToHost);
 
+    // Rust側から渡されたポインタに加算して返す
     *total_displacement += h_out_disp;
     *total_square_displacement += h_out_sq_disp;
 
+    // GPUのメモリを解放
     cudaFree(d_out_disp);
     cudaFree(d_out_sq_disp);
   }
