@@ -1,13 +1,18 @@
 use nalgebra::Vector2;
 use renderer::SimApp;
-use simulation::Real;
+use simulation::{DELTA_T, K, Real};
+use statistics::statistics;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::ops::Range;
+use std::path::Path;
 
 mod renderer;
 mod simulation;
+mod statistics;
 
 fn main() {
-    run_animation(0, 1000, 0.0..12.0, 0.08, Vector2::new(5.0, 0.0));
+    record_statistics("002", 0.02);
 }
 
 #[allow(dead_code)]
@@ -37,6 +42,53 @@ fn run_animation(
 }
 
 #[allow(dead_code)]
-fn ensemble_average() {
-    todo!("アンサンブル平均により、粒子の位置分布を推定する機能を実装する予定")
+fn record_statistics(folder_name: &str, length: Real) {
+    let path = Path::new("data").join(folder_name);
+    std::fs::create_dir_all(&path).expect("Failed to create data directory");
+
+    let mut config = File::create(path.join("config.txt")).unwrap();
+    writeln!(config, "時間の刻み幅: {}", DELTA_T).unwrap();
+    writeln!(config, "バネ定数: {}", K).unwrap();
+    writeln!(config, "棒の長さ: {}", length).unwrap();
+
+    let mut mu_writer = BufWriter::new(File::create(path.join("mu.dat")).unwrap());
+    let mut d_writer = BufWriter::new(File::create(path.join("d_eff.dat")).unwrap());
+    let mut time_writer = BufWriter::new(File::create(path.join("time.dat")).unwrap());
+    let mut alpha_writer = BufWriter::new(File::create(path.join("alpha.dat")).unwrap());
+
+    let start = std::time::Instant::now();
+
+    for i in 1..=100 {
+        let forward = statistics(length, i as Real);
+        let backward = statistics(length, -(i as Real));
+
+        writeln!(
+            mu_writer,
+            "{} {} {}",
+            i, forward.nonlinear_mobility, backward.nonlinear_mobility
+        )
+        .unwrap();
+        writeln!(
+            d_writer,
+            "{} {} {}",
+            i, forward.effective_diffusion, backward.effective_diffusion
+        )
+        .unwrap();
+        writeln!(
+            time_writer,
+            "{} {} {}",
+            i, forward.first_passage_time, backward.first_passage_time
+        )
+        .unwrap();
+        writeln!(
+            alpha_writer,
+            "{} {}",
+            i,
+            (forward.nonlinear_mobility - backward.nonlinear_mobility).abs()
+                / (forward.nonlinear_mobility + backward.nonlinear_mobility)
+        )
+        .unwrap();
+    }
+
+    writeln!(config, "計算時間: {:.2?}秒", start.elapsed()).unwrap();
 }

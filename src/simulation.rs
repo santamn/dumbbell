@@ -22,10 +22,10 @@ const fn const_sqrt(x: Real) -> Real {
     guess
 }
 
-const K: Real = 1.5e6; //                              壁の反発力の強さ
-const TIME: Real = 10.0; //                            総シミュレーションの時間
-const DELTA_T: Real = 2e-7; //                         シミュレーションの時間刻み
+pub const DELTA_T: Real = 2e-7; //                     シミュレーションの時間刻み
+pub const K: Real = 1.5e6; //                          壁の反発力の強さ
 const NOISE_SCALE: Real = const_sqrt(DELTA_T); //      ブラウン運動のノイズのスケール
+pub const TIME: Real = 10.0; //                        総シミュレーションの時間
 pub const STEPS: usize = (TIME / DELTA_T) as usize; // シミュレーションの総ステップ数
 
 // チャネルの境界を表すトレイトと、その実装としての天井と床の構造体
