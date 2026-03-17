@@ -11,6 +11,14 @@ rayon = "1.11.0"
 itertools = "0.14.0"
 egui = "0.33.3"
 eframe = "0.33.3"
+libc = "0.2"
+
+[build-dependencies]
+cc = { version = "1.0", optional = true }
+
+[features]
+default = []
+cuda = ["cc"]
 
 [profile.release]
 lto = "fat"
