@@ -1,0 +1,60 @@
+{
+  "name": "rectification",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "workspaceFolder": "/workspace",
+  "mounts": [
+    {
+      "source": "${localWorkspaceFolder}",
+      "target": "/workspace",
+      "type": "bind"
+    },
+    {
+      "source": "rectification-cargo-registry",
+      "target": "/usr/local/cargo/registry",
+      "type": "volume"
+    },
+    {
+      "source": "rectification-cargo-git",
+      "target": "/usr/local/cargo/git",
+      "type": "volume"
+    },
+    {
+      "source": "rectification-target",
+      "target": "${containerWorkspaceFolder}/target",
+      "type": "volume"
+    },
+    {
+      "source": "${env:SSH_AUTH_SOCK}",
+      "target": "/ssh-agent",
+      "type": "bind"
+    }
+  ],
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "configureZshAsDefaultShell": "true",
+      "username": "miyake"
+    },
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "1.94.0"
+    },
+    "ghcr.io/devcontainers-extra/features/apt-packages:1": {
+      "packages": "build-essential, clang, mold, gnuplot"
+    }
+  },
+  "containerUser": "miyake",
+  "remoteUser": "miyake",
+  "postCreateCommand": "cargo fetch",
+  "containerEnv": {
+    "CARGO_TERM_COLOR": "always",
+    "SSH_AUTH_SOCK": "/ssh-agent"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "tamasfe.even-better-toml"
+      ]
+    }
+  }
+}
