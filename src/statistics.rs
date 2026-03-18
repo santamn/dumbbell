@@ -20,15 +20,15 @@ pub struct Statistics {
 #[cfg(feature = "cuda")]
 unsafe extern "C" {
     unsafe fn run_simulation_cuda(
+        device_id: u64,
         k: f64,
         delta_t: f64,
         noise_scale: f64,
-        device_id: u64,
+        steps: u64,
+        ensemble_size: u64,
         seed: u64,
         length: f64,
         force_x: f64,
-        steps: u64,
-        ensemble_size: u64,
         total_displacement: *mut f64,
         total_square_displacement: *mut f64,
     );
@@ -40,26 +40,26 @@ pub fn statistics(length: f64, force: f64) -> Statistics {
     let (mean_displacement, mean_square_displacement) = (0..TOTAL_GPUS)
         .into_par_iter()
         .map(|device_id| {
-            let mut local_disp = 0.0;
-            let mut local_sq_disp = 0.0;
+            let mut disp = 0.0;
+            let mut sq_disp = 0.0;
 
             unsafe {
                 run_simulation_cuda(
+                    device_id,
                     K,
                     DELTA_T,
                     NOISE_SCALE,
-                    device_id,
-                    1 + device_id, // GPUごとにシードを変える
-                    length,
-                    force,
                     STEPS as u64,
                     ENSEMBLE_SIZE / TOTAL_GPUS, // 各GPUで処理するサンプル数
-                    &mut local_disp as *mut _,
-                    &mut local_sq_disp as *mut _,
+                    1 + device_id,              // 各GPUに与えるシード値
+                    length,
+                    force,
+                    &mut disp as *mut _,
+                    &mut sq_disp as *mut _,
                 );
             }
 
-            (local_disp, local_sq_disp)
+            (disp, sq_disp)
         })
         .reduce_with(|(d1, sq1), (d2, sq2)| (d1 + d2, sq1 + sq2))
         .map(|(sum, sq_sum)| (sum / ENSEMBLE_SIZE as f64, sq_sum / ENSEMBLE_SIZE as f64))

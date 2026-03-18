@@ -8,7 +8,7 @@
 #define PI M_PI
 #define TAU (2.0 * M_PI)
 
-// __device__ は「GPU上で実行され、GPUからのみ呼び出せる関数」を意味する
+// __device__ = GPU上で実行され、GPUからのみ呼び出せる関数
 // omega(x) = sin(2πx) + 0.25sin(4πx) + 1.12 = sin(2πx) + 0.5sin(2πx)cos(2πx) + 1.12
 __device__ double omega(double x)
 {
@@ -78,29 +78,53 @@ __device__ void repulsion(double k, double px, double py, double *fx, double *fy
   }
 }
 
-// __global__: CPUから呼び出せて、GPUで実行される関数（カーネル）
+// =====================================================
+// ==============  GPUでの実行単位について  ================
+// =====================================================
+// CUDAでは、多数のスレッドを管理するために
+//  グリッド (Grid) > ブロック (Block) > スレッド (Thread: 実行の最小単位)
+// という階層構造を持つ。
+// スレッドは仮想的な実行単位であり、物理的なコア以上に存在できるため、GPUは数万スレッドを同時に実行する
+
+// ======================================================
+// ==============  GPUでの並列実行のイメージ  ================
+// ======================================================
+// 1. SMへのブロックの割り当て
+//  GPUの内部には SM (Streaming Multiprocessor) と呼ばれる演算ユニットの塊が複数搭載されていて
+//  プログラム（カーネル）が起動すると、指定した数のブロックが手の空いているSMに次々と割り振られる。
+// 2. Warp（ワープ）単位での命令実行
+//  SMに割り当てられたブロック内のスレッドは、32個ずつのグループに分割される。これらは Warp（ワープ） と呼ばれる。
+// 3. SIMTアーキテクチャ (Single Instruction, Multiple Threads)
+//  Warp内の32個のCUDAコアは、「まったく同じ命令」を「同時に」実行する = SIMT
+//  全員が同じ simulate_particles という関数のコードを読み込み、1行目から同時に進んでいく。
+
+// __global__ = CPUから呼び出せて、GPUで実行される関数（カーネル）
+// シミュレーションの本体。オイラー・丸山法で粒子の位置と角度を更新し、アトミック演算で結果を集計する
 __global__ void simulate_particles(
     double k,
     double delta_t,
     double noise_scale,
+    uint64_t steps,
+    uint64_t ensemble_size,
     unsigned long long seed,
     double length,
     double force_x,
-    uint64_t steps,
-    uint64_t global_size,
     double *out_displacement,
     double *out_square_displacement)
 {
-  // 1. 自分のスレッド番号（担当する粒子のID）を求める
+  // 1. グローバルなスレッド番号（=担当する粒子のID）を求める
+  // blockIdx.x: グリッド内でのブロック番号
+  // blockDim.x: 1つのブロックに含まれるスレッドの数
+  // threadIdx.x: ブロック内でのスレッド番号
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-  // スレッド数がアンサンブル数を超えた場合は何もしない（端数処理）
-  if (idx >= global_size)
+  // スレッド数がこのGPUに割り当てられたアンサンブル数を超えた場合は何もしない（端数処理）
+  if (idx >= ensemble_size)
     return;
 
   // 2. 乱数生成器の初期化
   curandState state;
-  // 同じシードでも、スレッドID(idx)を渡すことで、全スレッドが異なる乱数列を生成します
+  // 同じシードでも、スレッドID(idx)を渡すことで、全スレッドが異なる乱数列を生成する
   curand_init(seed, idx, 0, &state);
 
   // 3. 粒子の初期状態の決定
@@ -119,7 +143,6 @@ __global__ void simulate_particles(
     double xi_y = curand_normal_double(&state);
     double xi_phi = curand_normal_double(&state);
 
-    // CUDA組み込み関数 sincos を使うと sin と cos を同時に高速計算できる
     double s, c;
     sincos(angle, &s, &c);
 
@@ -152,24 +175,24 @@ __global__ void simulate_particles(
 
   // 6. 結果の集計（アトミック演算）
   // 数万スレッドが同時に out_displacement に足し算をするとデータが壊れるため、
-  // atomicAdd を使って「1スレッドずつ順番に足し算」させます。
+  // atomicAdd を使って1スレッドずつ順番に足すようにする
   atomicAdd(out_displacement, delta_x);
   atomicAdd(out_square_displacement, delta_x * delta_x);
 }
 
-// extern "C" にすることで、C++特有の名前修飾（マングリング）を防ぎ、Rustから呼び出せるようにします
+// extern "C" とすることでC++特有の名前修飾（マングリング）を防ぎ、Rustから呼び出せるようにする
 extern "C"
 {
   void run_simulation_cuda(
+      uint64_t device_id,
       double k,
       double delta_t,
       double noise_scale,
-      uint64_t device_id,
+      uint64_t steps,
+      uint64_t ensemble_size,
       unsigned long long seed,
       double length,
       double force_x,
-      uint64_t steps,
-      uint64_t ensemble_size,
       double *total_displacement,
       double *total_square_displacement)
   {
@@ -185,12 +208,22 @@ extern "C"
     cudaMemset(d_out_sq_disp, 0, sizeof(double));
 
     // CUDAの実行構成（ブロックとスレッド）の決定
-    // 256スレッドを1グループ(ブロック)とし、必要なブロック数を計算します
+    // 256スレッドを1ブロックとし、必要なブロック数を算出する
     int threads = 256;
-    int blocks = (ensemble_size + threads - 1) / threads;
+    int blocks = (ensemble_size + threads - 1) / threads; // ⌈ensemble_size / threads⌉
 
     // カーネル（GPU関数）を起動
-    simulate_particles<<<blocks, threads>>>(k, delta_t, noise_scale, seed, length, force_x, steps, ensemble_size, d_out_disp, d_out_sq_disp);
+    simulate_particles<<<blocks, threads>>>(
+        k,
+        delta_t,
+        noise_scale,
+        steps,
+        ensemble_size,
+        seed,
+        length,
+        force_x,
+        d_out_disp,
+        d_out_sq_disp);
 
     // GPUの計算がすべて終わるまでCPUを待機させる
     cudaDeviceSynchronize();
@@ -201,9 +234,9 @@ extern "C"
     cudaMemcpy(&h_out_disp, d_out_disp, sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(&h_out_sq_disp, d_out_sq_disp, sizeof(double), cudaMemcpyDeviceToHost);
 
-    // Rust側から渡されたポインタに加算して返す
-    *total_displacement += h_out_disp;
-    *total_square_displacement += h_out_sq_disp;
+    // Rust側から渡されたポインタに結果を代入する
+    *total_displacement = h_out_disp;
+    *total_square_displacement = h_out_sq_disp;
 
     // GPUのメモリを解放
     cudaFree(d_out_disp);
