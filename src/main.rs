@@ -12,7 +12,7 @@ mod simulation;
 mod statistics;
 
 fn main() {
-    record_statistics("002", 0.02);
+    record_statistics("002_gpu", 0.02);
 }
 
 #[allow(dead_code)]

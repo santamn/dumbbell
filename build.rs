@@ -1,5 +1,5 @@
 fn main() {
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     {
         println!("cargo:rerun-if-changed=src/kernel.cu");
 

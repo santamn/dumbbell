@@ -1,15 +1,4 @@
-#[cfg(not(feature = "cuda"))]
-use crate::simulation::Particle;
-use crate::simulation::{DELTA_T, K, NOISE_SCALE, STEPS, TIME};
-#[cfg(not(feature = "cuda"))]
-use nalgebra::Vector2;
-#[cfg(not(feature = "cuda"))]
-use rand::{SeedableRng, rngs::SmallRng};
-use rayon::prelude::*;
-
 const ENSEMBLE_SIZE: u64 = 30_000; // アンサンブル平均のサンプル数
-#[cfg(feature = "cuda")]
-const TOTAL_GPUS: u64 = 3; // 使用するGPUの数
 
 pub struct Statistics {
     pub effective_diffusion: f64,
@@ -17,87 +6,104 @@ pub struct Statistics {
     pub nonlinear_mobility: f64,
 }
 
-#[cfg(feature = "cuda")]
-unsafe extern "C" {
-    unsafe fn run_simulation_cuda(
-        device_id: u64,
-        k: f64,
-        delta_t: f64,
-        noise_scale: f64,
-        steps: u64,
-        ensemble_size: u64,
-        seed: u64,
-        length: f64,
-        force_x: f64,
-        total_displacement: *mut f64,
-        total_square_displacement: *mut f64,
-    );
-}
+pub use backend::statistics;
 
-#[cfg(feature = "cuda")]
-pub fn statistics(length: f64, force: f64) -> Statistics {
-    // 各GPUでの計算を並列で実行する
-    let (mean_displacement, mean_square_displacement) = (0..TOTAL_GPUS)
-        .into_par_iter()
-        .map(|device_id| {
-            let mut disp = 0.0;
-            let mut sq_disp = 0.0;
+#[cfg(feature = "gpu")]
+mod backend {
+    use super::{ENSEMBLE_SIZE, Statistics, diffusion, nonlinear_mobility};
+    use crate::simulation::{DELTA_T, K, NOISE_SCALE, STEPS, TIME};
+    use rayon::prelude::*;
 
-            unsafe {
-                run_simulation_cuda(
-                    device_id,
-                    K,
-                    DELTA_T,
-                    NOISE_SCALE,
-                    STEPS as u64,
-                    ENSEMBLE_SIZE / TOTAL_GPUS, // 各GPUで処理するサンプル数
-                    1 + device_id,              // 各GPUに与えるシード値
-                    length,
-                    force,
-                    &mut disp as *mut _,
-                    &mut sq_disp as *mut _,
-                );
-            }
+    const TOTAL_GPUS: u64 = 3; // 使用するGPUの数
 
-            (disp, sq_disp)
-        })
-        .reduce_with(|(d1, sq1), (d2, sq2)| (d1 + d2, sq1 + sq2))
-        .map(|(sum, sq_sum)| (sum / ENSEMBLE_SIZE as f64, sq_sum / ENSEMBLE_SIZE as f64))
-        .unwrap();
+    unsafe extern "C" {
+        unsafe fn calculate_diplacement_sum_on_gpu(
+            device_id: u64,
+            k: f64,
+            delta_t: f64,
+            noise_scale: f64,
+            steps: u64,
+            ensemble_size: u64,
+            seed: u64,
+            length: f64,
+            force_x: f64,
+            total_displacement: *mut f64,
+            total_square_displacement: *mut f64,
+        );
+    }
 
-    let mean_speed = mean_displacement / TIME;
+    pub fn statistics(length: f64, force: f64) -> Statistics {
+        // 各GPUでの計算を並列で実行する
+        let (mean_displacement, mean_square_displacement) = (0..TOTAL_GPUS)
+            .into_par_iter()
+            .map(|device_id| {
+                let mut disp_sum = 0.0;
+                let mut sq_disp_sum = 0.0;
 
-    Statistics {
-        effective_diffusion: diffusion(mean_displacement, mean_square_displacement, TIME),
-        first_passage_time: 1.0 / mean_speed,
-        nonlinear_mobility: nonlinear_mobility(mean_speed, force),
+                unsafe {
+                    calculate_diplacement_sum_on_gpu(
+                        device_id,
+                        K,
+                        DELTA_T,
+                        NOISE_SCALE,
+                        STEPS as u64,
+                        ENSEMBLE_SIZE / TOTAL_GPUS, // 各GPUで処理するサンプル数
+                        1 + device_id,              // 各GPUに与えるシード値
+                        length,
+                        force,
+                        &mut disp_sum as *mut _,
+                        &mut sq_disp_sum as *mut _,
+                    );
+                }
+
+                (disp_sum, sq_disp_sum)
+            })
+            .reduce_with(|(a, aa), (d, sq)| (a + d, aa + sq))
+            .map(|(sum, sq_sum)| (sum / ENSEMBLE_SIZE as f64, sq_sum / ENSEMBLE_SIZE as f64))
+            .unwrap();
+
+        let mean_speed = mean_displacement / TIME;
+
+        Statistics {
+            effective_diffusion: diffusion(mean_displacement, mean_square_displacement, TIME),
+            first_passage_time: 1.0 / mean_speed,
+            nonlinear_mobility: nonlinear_mobility(mean_speed, force),
+        }
     }
 }
 
-#[cfg(not(feature = "cuda"))]
-/// アンサンブル平均を用いて、非線形移動度、整流尺度、有効拡散係数を計算する
-pub fn statistics(length: f64, force: f64) -> Statistics {
-    let force_vec = Vector2::new(force, 0.0);
-    let (mean_displacement, mean_square_displacement) = (0..ENSEMBLE_SIZE)
-        .into_par_iter()
-        .map(|i| {
-            let rng = SmallRng::seed_from_u64(i);
-            let mut particle = Particle::new(rng, length, force_vec);
-            let start = particle.now().position.x;
-            let delta_x = particle.nth(STEPS).unwrap().position.x - start; // 移動距離
+#[cfg(not(feature = "gpu"))]
+mod backend {
+    use super::{ENSEMBLE_SIZE, Statistics, diffusion, nonlinear_mobility};
+    use crate::simulation::{Particle, STEPS, TIME};
+    use nalgebra::Vector2;
+    use rand::{SeedableRng, rngs::SmallRng};
+    use rayon::prelude::*;
 
-            (delta_x, delta_x * delta_x) // 変位, 二乗変位
-        })
-        .reduce_with(|(a, aa), (x, xx)| (a + x, aa + xx))
-        .map(|(sum, sq_sum)| (sum / ENSEMBLE_SIZE as f64, sq_sum / ENSEMBLE_SIZE as f64))
-        .unwrap();
+    /// アンサンブル平均を用いて、非線形移動度、整流尺度、有効拡散係数を計算する
+    pub fn statistics(length: f64, force: f64) -> Statistics {
+        let force_vec = Vector2::new(force, 0.0);
+        let (mean_displacement, mean_square_displacement) = (0..ENSEMBLE_SIZE)
+            .into_par_iter()
+            .map(|i| {
+                let rng = SmallRng::seed_from_u64(i);
+                let mut particle = Particle::new(rng, length, force_vec);
+                let start = particle.now().position.x;
+                let delta_x = particle.nth(STEPS).unwrap().position.x - start; // 移動距離
 
-    let mean_speed = mean_displacement / TIME;
+                (delta_x, delta_x * delta_x) // 変位, 二乗変位
+            })
+            .reduce_with(|(a, aa), (x, xx)| (a + x, aa + xx))
+            .map(|(sum, sq_sum)| (sum / ENSEMBLE_SIZE as f64, sq_sum / ENSEMBLE_SIZE as f64))
+            .unwrap();
 
-    Statistics {
-        effective_diffusion: diffusion(mean_displacement, mean_square_displacement, TIME),
-        first_passage_time: 1.0 / mean_speed,
-        nonlinear_mobility: nonlinear_mobility(mean_speed, force),
+        let mean_speed = mean_displacement / TIME;
+
+        Statistics {
+            effective_diffusion: diffusion(mean_displacement, mean_square_displacement, TIME),
+            first_passage_time: 1.0 / mean_speed,
+            nonlinear_mobility: nonlinear_mobility(mean_speed, force),
+        }
     }
 }
 

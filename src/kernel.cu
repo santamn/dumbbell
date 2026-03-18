@@ -89,11 +89,11 @@ __device__ void repulsion(double k, double px, double py, double *fx, double *fy
 //  SMに割り当てられたブロック内のスレッドは、32個ずつのグループに分割される。これらは Warp（ワープ） と呼ばれる。
 // 3. SIMTアーキテクチャ (Single Instruction, Multiple Threads)
 //  Warp内の32個のCUDAコアは、「まったく同じ命令」を「同時に」実行する = SIMT
-//  全員が同じ simulate_particles という関数のコードを読み込み、1行目から同時に進んでいく。
+//  全員が同じ particles_diplacement_sum という関数のコードを読み込み、1行目から同時に進んでいく。
 
 // __global__ = CPUから呼び出せて、GPUで実行される関数（カーネル）
-// シミュレーションの本体。オイラー・丸山法で粒子の位置と角度を更新し、アトミック演算で結果を集計する
-__global__ void simulate_particles(
+// シミュレーションの本体。オイラー・丸山法で粒子の運動をシミュレートし、アトミック演算で結果を集計する
+__global__ void particles_diplacement_sum(
     double k,
     double delta_t,
     double noise_scale,
@@ -176,7 +176,7 @@ __global__ void simulate_particles(
 // extern "C" とすることでC++特有の名前修飾（マングリング）を防ぎ、Rustから呼び出せるようにする
 extern "C"
 {
-  void run_simulation_cuda(
+  void calculate_diplacement_sum_on_gpu(
       uint64_t device_id,
       double k,
       double delta_t,
@@ -206,7 +206,7 @@ extern "C"
     int blocks = (ensemble_size + threads - 1) / threads; // ⌈ensemble_size / threads⌉
 
     // カーネル（GPU関数）を起動
-    simulate_particles<<<blocks, threads>>>(
+    particles_diplacement_sum<<<blocks, threads>>>(
         k,
         delta_t,
         noise_scale,
