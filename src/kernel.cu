@@ -3,45 +3,45 @@
 #include <math.h>
 #include <iostream>
 #include <stdint.h>
+#include <float.h>
 
-#define DELTA_T 2e-7
-#define K 1.5e6
-#define TIME 10.0
-#define PI 3.14159265358979323846
-#define TAU (2.0 * PI)
-#define NOISE_SCALE sqrt(DELTA_T)
+#define PI M_PI
+#define TAU (2.0 * M_PI)
 
 // __device__ は「GPU上で実行され、GPUからのみ呼び出せる関数」を意味する
+// omega(x) = sin(2πx) + 0.25sin(4πx) + 1.12 = sin(2πx) + 0.5sin(2πx)cos(2πx) + 1.12
 __device__ double omega(double x)
 {
-  double s = sin(TAU * x);
-  double c = cos(TAU * x);
+  double s, c;
+  sincos(TAU * x, &s, &c);
   return s + 0.5 * s * c + 1.12;
 }
 
+// omega'(x) = 2πcos(2πx) + πcos(4πx) = 2πcos(2πx)(cos(2πx) + 1) - π
 __device__ double omega_derivative(double x)
 {
   double c = cos(TAU * x);
   return TAU * c * (c + 1.0) - PI;
 }
 
+// omega"(x) = -4π^2sin(2πx) - 4π^2sin(4πx) = -(2π)^2sin(2πx)(1 + 2cos(2πx))
 __device__ double omega_derivative_second(double x)
 {
-  double s = sin(TAU * x);
-  double c = cos(TAU * x);
+  double s, c;
+  sincos(TAU * x, &s, &c);
   return -TAU * TAU * s * (1.0 + 2.0 * c);
 }
 
+// 点から壁へ降ろした垂線の足のx座標を求める関数
 __device__ double perpendicular_foot_x(double px, double py, double sign)
 {
   double x = px;
   for (int i = 0; i < 1000; ++i)
   {
-    double current_omega = omega(x);
-    double h = sign * current_omega - py;
+    double h = sign * omega(x) - py;
     double p = sign * omega_derivative(x);
     double d = (x - px + p * h) / (1.0 + p * p - sign * omega_derivative_second(x) * h);
-    if (fabs(d) > 2.2204460492503131e-16)
+    if (fabs(d) > DBL_EPSILON)
     {
       x = x - d;
     }
@@ -53,32 +53,36 @@ __device__ double perpendicular_foot_x(double px, double py, double sign)
   return x;
 }
 
-__device__ void repulsion(double px, double py, double *fx, double *fy)
+// 壁への沈み込みに対する反発力を計算する関数
+__device__ void repulsion(double k, double px, double py, double *fx, double *fy)
 {
   double current_omega = omega(px);
-  if (py > current_omega)
-  {
-    double f_x = perpendicular_foot_x(px, py, 1.0);
-    double f_y = omega(f_x);
-    *fx = K * (f_x - px);
-    *fy = K * (f_y - py);
-  }
-  else if (py < -current_omega)
-  {
-    double f_x = perpendicular_foot_x(px, py, -1.0);
-    double f_y = -omega(f_x);
-    *fx = K * (f_x - px);
-    *fy = K * (f_y - py);
-  }
-  else
+  if (-current_omega <= py && py <= current_omega)
   {
     *fx = 0.0;
     *fy = 0.0;
+  }
+  else if (py > current_omega)
+  {
+    double x = perpendicular_foot_x(px, py, 1.0);
+    double y = omega(x);
+    *fx = k * (x - px);
+    *fy = k * (y - py);
+  }
+  else // (py < -current_omega)
+  {
+    double x = perpendicular_foot_x(px, py, -1.0);
+    double y = -omega(x);
+    *fx = k * (x - px);
+    *fy = k * (y - py);
   }
 }
 
 // __global__: CPUから呼び出せて、GPUで実行される関数（カーネル）
 __global__ void simulate_particles(
+    double k,
+    double delta_t,
+    double noise_scale,
     unsigned long long seed,
     double length,
     double force_x,
@@ -121,8 +125,6 @@ __global__ void simulate_particles(
 
     double h_x = 0.5 * length * c;
     double h_y = 0.5 * length * s;
-    double e_phi_x = -s;
-    double e_phi_y = c;
 
     // 棒の両端の座標
     double p1_x = x + h_x;
@@ -132,20 +134,17 @@ __global__ void simulate_particles(
 
     // 壁からの反発力を計算
     double f1_x, f1_y;
-    repulsion(p1_x, p1_y, &f1_x, &f1_y);
+    repulsion(k, p1_x, p1_y, &f1_x, &f1_y);
 
     double f2_x, f2_y;
-    repulsion(p2_x, p2_y, &f2_x, &f2_y);
+    repulsion(k, p2_x, p2_y, &f2_x, &f2_y);
+
+    double exterior_product = -s * (f1_x - f2_x) + c * (f1_y - f2_y);
 
     // オイラー・丸山法による位置と角度の更新
-    x += (force_x + 0.5 * (f1_x + f2_x)) * DELTA_T + xi_x * NOISE_SCALE;
-    y += (0.5 * (f1_y + f2_y)) * DELTA_T + xi_y * NOISE_SCALE;
-
-    double f_diff_x = f1_x - f2_x;
-    double f_diff_y = f1_y - f2_y;
-    double dot_prod = f_diff_x * e_phi_x + f_diff_y * e_phi_y;
-
-    angle += (dot_prod * DELTA_T + 2.0 * xi_phi * NOISE_SCALE) / length;
+    x += (force_x + 0.5 * (f1_x + f2_x)) * delta_t + xi_x * noise_scale;
+    y += (0.5 * (f1_y + f2_y)) * delta_t + xi_y * noise_scale;
+    angle += (exterior_product * delta_t + 2.0 * xi_phi * noise_scale) / length;
   }
 
   // 5. 最終的な変位を計算
@@ -162,6 +161,9 @@ __global__ void simulate_particles(
 extern "C"
 {
   void run_simulation_cuda(
+      double k,
+      double delta_t,
+      double noise_scale,
       uint64_t device_id,
       unsigned long long seed,
       double length,
@@ -188,7 +190,7 @@ extern "C"
     int blocks = (ensemble_size + threads - 1) / threads;
 
     // カーネル（GPU関数）を起動
-    simulate_particles<<<blocks, threads>>>(seed, length, force_x, steps, ensemble_size, d_out_disp, d_out_sq_disp);
+    simulate_particles<<<blocks, threads>>>(k, delta_t, noise_scale, seed, length, force_x, steps, ensemble_size, d_out_disp, d_out_sq_disp);
 
     // GPUの計算がすべて終わるまでCPUを待機させる
     cudaDeviceSynchronize();

@@ -4,10 +4,8 @@ use rand_distr::StandardNormal;
 use std::f64::consts::{PI, TAU};
 use std::ops::Add;
 
-pub type Real = f64;
-
 /// 定数文脈で平方根を計算するためのニュートン法による近似関数
-const fn const_sqrt(x: Real) -> Real {
+const fn const_sqrt(x: f64) -> f64 {
     assert!(
         0.0 <= x && x <= 1.0,
         "sqrt_constは0以上1以下の値に対してのみ定義されます"
@@ -22,36 +20,36 @@ const fn const_sqrt(x: Real) -> Real {
     guess
 }
 
-pub const DELTA_T: Real = 2e-7; //                     シミュレーションの時間刻み
-pub const K: Real = 1.5e6; //                          壁の反発力の強さ
-const NOISE_SCALE: Real = const_sqrt(DELTA_T); //      ブラウン運動のノイズのスケール
-pub const TIME: Real = 10.0; //                        総シミュレーションの時間
+pub const DELTA_T: f64 = 2e-7; //                      シミュレーションの時間刻み
+pub const K: f64 = 1.5e6; //                           壁の反発力の強さ
+pub const NOISE_SCALE: f64 = const_sqrt(DELTA_T); //   ブラウン運動のノイズのスケール
+pub const TIME: f64 = 10.0; //                         総シミュレーションの時間
 pub const STEPS: usize = (TIME / DELTA_T) as usize; // シミュレーションの総ステップ数
 
 // チャネルの境界を表すトレイトと、その実装としての天井と床の構造体
 trait Wall {
-    const SIGN: Real; // 壁の上下を表す定数（上壁: 1, 下壁: -1）
+    const SIGN: f64; // 壁の上下を表す定数（上壁: 1, 下壁: -1）
 }
 
 struct Ceiling;
 impl Wall for Ceiling {
-    const SIGN: Real = 1.0;
+    const SIGN: f64 = 1.0;
 }
 
 struct Floor;
 impl Wall for Floor {
-    const SIGN: Real = -1.0;
+    const SIGN: f64 = -1.0;
 }
 
 /// 粒子の状態を表す構造体
 #[derive(Debug, Clone, Copy)]
 pub struct State {
-    pub position: Point2<Real>,
-    pub angle: Real,
+    pub position: Point2<f64>,
+    pub angle: f64,
 }
 
 impl State {
-    pub fn new<R: Rng>(rng: &mut R, length: Real) -> Self {
+    pub fn new<R: Rng>(rng: &mut R, length: f64) -> Self {
         let x = rng.random_range(-0.1..0.7);
         let limit = omega(x) - length * 0.5;
         Self {
@@ -61,10 +59,10 @@ impl State {
     }
 }
 
-impl Add<(Vector2<Real>, Real)> for State {
+impl Add<(Vector2<f64>, f64)> for State {
     type Output = Self;
 
-    fn add(self, other: (Vector2<Real>, Real)) -> Self {
+    fn add(self, other: (Vector2<f64>, f64)) -> Self {
         Self {
             position: self.position + other.0,
             angle: self.angle + other.1,
@@ -77,13 +75,13 @@ impl Add<(Vector2<Real>, Real)> for State {
 pub struct Particle<R: Rng> {
     rng: R,
     is_first: bool,
-    length: Real,
-    force: Vector2<Real>,
+    length: f64,
+    force: Vector2<f64>,
     state: State,
 }
 
 impl<R: Rng> Particle<R> {
-    pub fn new(mut rng: R, length: Real, force: Vector2<Real>) -> Self {
+    pub fn new(mut rng: R, length: f64, force: Vector2<f64>) -> Self {
         let state = State::new(&mut rng, length);
         Self {
             rng,
@@ -94,13 +92,13 @@ impl<R: Rng> Particle<R> {
         }
     }
 
-    pub fn endpoints(&self) -> (Point2<Real>, Point2<Real>) {
+    pub fn endpoints(&self) -> (Point2<f64>, Point2<f64>) {
         let (s, c) = self.state.angle.sin_cos();
         let h = 0.5 * self.length * Vector2::new(c, s);
         (self.state.position + h, self.state.position - h)
     }
 
-    pub fn force(&self) -> Vector2<Real> {
+    pub fn force(&self) -> Vector2<f64> {
         self.force
     }
 
@@ -120,7 +118,7 @@ impl<R: Rng> Iterator for Particle<R> {
 
         let xi_x = self.rng.sample(StandardNormal);
         let xi_y = self.rng.sample(StandardNormal);
-        let xi_phi = self.rng.sample::<Real, _>(StandardNormal);
+        let xi_phi = self.rng.sample::<f64, _>(StandardNormal);
 
         let (s, c) = self.state.angle.sin_cos();
         let h = 0.5 * self.length * Vector2::new(c, s);
@@ -139,7 +137,7 @@ impl<R: Rng> Iterator for Particle<R> {
 }
 
 /// 壁への沈み込みに対する反発力
-fn repulsion(point: &Point2<Real>) -> Vector2<Real> {
+fn repulsion(point: &Point2<f64>) -> Vector2<f64> {
     K * if point.y > omega(point.x) {
         perpendicular_foot::<Ceiling>(point) - point
     } else if point.y < -omega(point.x) {
@@ -150,7 +148,7 @@ fn repulsion(point: &Point2<Real>) -> Vector2<Real> {
 }
 
 /// 点から壁への垂線の足を求める関数
-fn perpendicular_foot<W: Wall>(point: &Point2<Real>) -> Point2<Real> {
+fn perpendicular_foot<W: Wall>(point: &Point2<f64>) -> Point2<f64> {
     std::iter::successors(Some(point.x), |&x| {
         let h = W::SIGN * omega(x) - point.y;
         let p = W::SIGN * omega_derivative(x);
@@ -159,7 +157,7 @@ fn perpendicular_foot<W: Wall>(point: &Point2<Real>) -> Point2<Real> {
         // ニュートン法の更新式: x_next = x - (x - x_0 + f'(x) * (f(x) - y_0)) / (1 + f'(x)^2 - f''(x) * (f(x) - y_0))
         let d = (x - point.x + p * h) / (1.0 + p * p - W::SIGN * omega_derivative_second(x) * h);
 
-        (d.abs() > Real::EPSILON).then_some(x - d)
+        (d.abs() > f64::EPSILON).then_some(x - d)
     })
     .take(1000) // 1000回の更新で収束しない場合は諦める
     .last()
@@ -169,21 +167,21 @@ fn perpendicular_foot<W: Wall>(point: &Point2<Real>) -> Point2<Real> {
 
 #[inline]
 /// omega(x) = sin(2πx) + 0.25sin(4πx) + 1.12 = sin(2πx) + 0.5sin(2πx)cos(2πx) + 1.12
-pub fn omega(x: Real) -> Real {
+pub fn omega(x: f64) -> f64 {
     let (s, c) = (TAU * x).sin_cos();
     s + 0.5 * s * c + 1.12
 }
 
 #[inline]
 /// omega'(x) = 2πcos(2πx) + πcos(4πx) = 2πcos(2πx)(cos(2πx) + 1) - π
-fn omega_derivative(x: Real) -> Real {
+fn omega_derivative(x: f64) -> f64 {
     let c = (TAU * x).cos();
     TAU * c * (c + 1.0) - PI
 }
 
 #[inline]
 /// omega"(x) = -4π^2sin(2πx) - 4π^2sin(4πx) = -(2π)^2sin(2πx)(1 + 2cos(2πx))
-fn omega_derivative_second(x: Real) -> Real {
+fn omega_derivative_second(x: f64) -> f64 {
     let (s, c) = (TAU * x).sin_cos();
     -TAU * TAU * s * (1.0 + 2.0 * c)
 }

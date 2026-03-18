@@ -1,6 +1,6 @@
 use nalgebra::Vector2;
 use renderer::SimApp;
-use simulation::{DELTA_T, K, Real};
+use simulation::{DELTA_T, K};
 use statistics::statistics;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -19,9 +19,9 @@ fn main() {
 fn run_animation(
     seed: u64,
     sample_stride: usize,
-    x_range: Range<Real>,
-    rod_length: Real,
-    force: Vector2<Real>,
+    x_range: Range<f64>,
+    rod_length: f64,
+    force: Vector2<f64>,
 ) {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -42,7 +42,7 @@ fn run_animation(
 }
 
 #[allow(dead_code)]
-fn record_statistics(folder_name: &str, length: Real) {
+fn record_statistics(folder_name: &str, length: f64) {
     let path = Path::new("data").join(folder_name);
     std::fs::create_dir_all(&path).expect("Failed to create data directory");
 
@@ -59,8 +59,8 @@ fn record_statistics(folder_name: &str, length: Real) {
     let start = std::time::Instant::now();
 
     for i in 1..=100 {
-        let forward = statistics(length, i as Real);
-        let backward = statistics(length, -(i as Real));
+        let forward = statistics(length, i as f64);
+        let backward = statistics(length, -(i as f64));
 
         writeln!(
             mu_writer,

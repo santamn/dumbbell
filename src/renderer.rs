@@ -1,4 +1,4 @@
-use crate::simulation::{Particle, Real, STEPS, omega};
+use crate::simulation::{Particle, STEPS, omega};
 use eframe::egui::{CentralPanel, Color32, Context, Pos2, Rect, Sense, Stroke, TopBottomPanel};
 use nalgebra::{Point2, Vector2};
 use rand::{SeedableRng, rngs::SmallRng};
@@ -6,10 +6,10 @@ use std::cell::OnceCell;
 use std::f64::consts::TAU;
 use std::ops::Range;
 
-const BOUNDARY_SAMPLING_STRIDE: Real = 0.001;
-const LOCAL_MINIUM_POINT: Real = -0.190359162688;
-const Y_MAX: Real = 2.23;
-const Y_MIN: Real = -2.23;
+const BOUNDARY_SAMPLING_STRIDE: f64 = 0.001;
+const LOCAL_MINIUM_POINT: f64 = -0.190359162688;
+const Y_MAX: f64 = 2.23;
+const Y_MIN: f64 = -2.23;
 
 /// シミュレーションの可視化を管理するアプリケーション構造体
 pub struct SimApp {
@@ -19,16 +19,16 @@ pub struct SimApp {
     running: bool,                              // アニメーションが進行中かどうか
     sample_stride: usize,                       // 1フレームで進めるステップ数
     trail: Vec<Pos2>,                           // 粒子の軌跡を保存するバッファ
-    x_range: Range<Real>,                       // 描画するx座標の範囲
+    x_range: Range<f64>,                        // 描画するx座標の範囲
 }
 
 impl SimApp {
     pub fn new(
         seed: u64,
         sample_stride: usize,
-        x_range: Range<Real>,
-        rod_length: Real,
-        force: Vector2<Real>,
+        x_range: Range<f64>,
+        rod_length: f64,
+        force: Vector2<f64>,
     ) -> Self {
         Self {
             boundary: OnceCell::new(),
@@ -43,7 +43,7 @@ impl SimApp {
     }
 
     /// シミュレーション上の座標を表示画面上の座標系に変換する
-    fn screen_position(&self, rect: Rect, point: Point2<Real>) -> Pos2 {
+    fn screen_position(&self, rect: Rect, point: Point2<f64>) -> Pos2 {
         let real_w = (self.x_range.end - self.x_range.start) as f32;
         let real_h = (Y_MAX - Y_MIN) as f32;
         let scale = (rect.width() / real_w).min(rect.height() / real_h);
@@ -97,7 +97,7 @@ impl eframe::App for SimApp {
             let (upper_boundary, lower_boundary) = self.boundary.get_or_init(|| {
                 (0..=((self.x_range.end - self.x_range.start) / BOUNDARY_SAMPLING_STRIDE) as usize)
                     .map(|i| {
-                        let x = self.x_range.start + i as Real * BOUNDARY_SAMPLING_STRIDE;
+                        let x = self.x_range.start + i as f64 * BOUNDARY_SAMPLING_STRIDE;
                         let y = omega(x);
                         (
                             self.screen_position(rect, Point2::new(x, y)),
