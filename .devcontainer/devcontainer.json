@@ -47,13 +47,17 @@
       "packages": "build-essential, clang, mold, gnuplot, ripgrep"
     }
   },
-  "runArgs": ["--gpus=all", "--memory=60gb"],
+  "runArgs": [
+    "--device=nvidia.com/gpu=1",
+    "--device=nvidia.com/gpu=2",
+    "--device=nvidia.com/gpu=3",
+    "--memory=60gb"
+  ],
   "containerUser": "miyake",
   "postCreateCommand": "cargo fetch",
   "containerEnv": {
     "CARGO_TERM_COLOR": "always",
-    "SSH_AUTH_SOCK": "/ssh-agent",
-    "CUDA_VISIBLE_DEVICES": "1,2,3"
+    "SSH_AUTH_SOCK": "/ssh-agent"
   },
   "remoteEnv": {
     "PATH": "/usr/local/cuda/bin:${containerEnv:PATH}",

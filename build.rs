@@ -5,7 +5,7 @@ fn main() {
 
         cc::Build::new()
             .cuda(true)
-            .flag("-arch=sm_80") // Compute Capability 8.0 for A100
+            .flag("-arch=sm_80")
             .file("src/simulation.cu")
             .compile("simulation");
 

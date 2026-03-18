@@ -154,7 +154,7 @@ __device__ double simulate_particle(
 //  SMに割り当てられたブロック内のスレッドは、32個ずつのグループに分割される。これらは Warp（ワープ） と呼ばれる。
 // 3. SIMTアーキテクチャ (Single Instruction, Multiple Threads)
 //  Warp内の32個のCUDAコアは、「まったく同じ命令」を「同時に」実行する = SIMT
-//  全員が同じ displacement_sum という関数のコードを読み込み、1行目から同時に進んでいく。
+//  全員が同じ__global__関数のコードを読み込み、1行目から同時に進んでいく。
 
 #define THREADS_PER_BLOCK 256
 
