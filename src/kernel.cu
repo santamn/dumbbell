@@ -56,26 +56,19 @@ __device__ double perpendicular_foot_x(double px, double py, double sign)
 // 壁への沈み込みに対する反発力を計算する関数
 __device__ void repulsion(double k, double px, double py, double *fx, double *fy)
 {
-  double current_omega = omega(px);
-  if (-current_omega <= py && py <= current_omega)
-  {
-    *fx = 0.0;
-    *fy = 0.0;
-  }
-  else if (py > current_omega)
-  {
-    double x = perpendicular_foot_x(px, py, 1.0);
-    double y = omega(x);
-    *fx = k * (x - px);
-    *fy = k * (y - py);
-  }
-  else // (py < -current_omega)
-  {
-    double x = perpendicular_foot_x(px, py, -1.0);
-    double y = -omega(x);
-    *fx = k * (x - px);
-    *fy = k * (y - py);
-  }
+  *fx = 0.0;
+  *fy = 0.0;
+
+  double w = omega(px);
+  if (-w <= py && py <= w)
+    return;
+
+  double sign = (py > w) ? 1.0 : -1.0;
+  double x = perpendicular_foot_x(px, py, sign);
+  double y = sign * omega(x);
+
+  *fx = k * (x - px);
+  *fy = k * (y - py);
 }
 
 // =====================================================
