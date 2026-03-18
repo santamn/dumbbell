@@ -44,7 +44,7 @@
       "cudaVersion": "12.6"
     },
     "ghcr.io/devcontainers-extra/features/apt-packages:1": {
-      "packages": "build-essential, clang, mold, gnuplot"
+      "packages": "build-essential, clang, mold, gnuplot, ripgrep, fd"
     }
   },
   "runArgs": ["--gpus=all", "--memory=60gb"],
