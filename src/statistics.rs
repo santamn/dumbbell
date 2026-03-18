@@ -17,7 +17,7 @@ mod backend {
     const TOTAL_GPUS: u64 = 3; // 使用するGPUの数
 
     unsafe extern "C" {
-        unsafe fn calculate_diplacement_sum_on_gpu(
+        unsafe fn calculate_displacement_sum_on_gpu(
             device_id: u64,
             k: f64,
             delta_t: f64,
@@ -32,6 +32,7 @@ mod backend {
         );
     }
 
+    /// GPUを用いてアンサンブル平均を計算し、非線形移動度、整流尺度、有効拡散係数を求める
     pub fn statistics(length: f64, force: f64) -> Statistics {
         // 各GPUでの計算を並列で実行する
         let (mean_displacement, mean_square_displacement) = (0..TOTAL_GPUS)
@@ -41,7 +42,7 @@ mod backend {
                 let mut sq_disp_sum = 0.0;
 
                 unsafe {
-                    calculate_diplacement_sum_on_gpu(
+                    calculate_displacement_sum_on_gpu(
                         device_id,
                         K,
                         DELTA_T,
