@@ -12,7 +12,7 @@ mod simulation;
 mod statistics;
 
 fn main() {
-    record_statistics("002", 0.02);
+    run_animation(0, 1000, 0.0..5.0, 0.08, Vector2::new(1.0, 0.0));
 }
 
 #[allow(dead_code)]
