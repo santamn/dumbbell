@@ -220,38 +220,55 @@ __global__ void displacement_sum(
 }
 
 // extern "C" とすることでC++特有の名前修飾（マングリング）を防ぎ、Rustから呼び出せるようにする
-extern "C"
+extern "C" {
+
+struct GpuTaskData {
+    cudaStream_t stream;
+    cudaEvent_t event;
+    double *d_out_disp;     // デバイス(GPU)側の変位の合計
+    double *d_out_sq_disp;  // デバイス(GPU)側の二乗変位の合計
+    double *h_out_disp;     // ホスト(CPU)側の変位の合計（非同期転送・ポーリング用）
+    double *h_out_sq_disp;  // ホスト(CPU)側の二乗変位の合計（非同期転送・ポーリング用）
+    int device_id;          // 実行対象のGPUデバイスID
+};
+
+extern "C" {
+
+/// 非同期でGPU上のシミュレーション計算を開始する
+/// 返り値として、計算リソースや完了イベントを保持する `GpuTaskData` のポインタを返す
+void* start_calculate_displacement_sum_on_gpu(
+    uint64_t device_id,
+    double k,
+    double delta_t,
+    double noise_scale,
+    uint64_t steps,
+    uint64_t ensemble_size,
+    unsigned long long seed,
+    double length,
+    double force_x)
 {
-  void calculate_displacement_sum_on_gpu(
-      uint64_t device_id,
-      double k,
-      double delta_t,
-      double noise_scale,
-      uint64_t steps,
-      uint64_t ensemble_size,
-      unsigned long long seed,
-      double length,
-      double force_x,
-      double *total_displacement,
-      double *total_square_displacement)
-  {
     // 対象のGPUデバイスを選択
     cudaSetDevice(device_id);
 
-    // GPU上のメモリ領域を確保し、0で初期化
-    double *d_out_disp;
-    double *d_out_sq_disp;
-    cudaMalloc(&d_out_disp, sizeof(double));
-    cudaMalloc(&d_out_sq_disp, sizeof(double));
-    cudaMemset(d_out_disp, 0, sizeof(double));
-    cudaMemset(d_out_sq_disp, 0, sizeof(double));
+    // リソース管理用構造体の初期化
+    GpuTaskData* data = new GpuTaskData();
+    data->device_id = device_id;
+    cudaStreamCreate(&data->stream);
+    cudaEventCreate(&data->event);
 
-    // CUDAの実行構成（ブロックとスレッド）の決定
-    // 256スレッドを1ブロックとし、必要なブロック数を算出する
-    int blocks = (ensemble_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK; // ⌈ensemble_size / threads⌉
+    // デバイス(GPU)メモリの確保
+    cudaMalloc(&data->d_out_disp, sizeof(double));
+    cudaMalloc(&data->d_out_sq_disp, sizeof(double));
+    
+    // ホスト(CPU)用にピン留めメモリ（ページロックメモリ）を確保（非同期転送用）
+    cudaMallocHost(&data->h_out_disp, sizeof(double));
+    cudaMallocHost(&data->h_out_sq_disp, sizeof(double));
 
-    // カーネル（GPU関数）を起動
-    displacement_sum<<<blocks, THREADS_PER_BLOCK>>>(
+    // ブロック数の計算
+    int blocks = (ensemble_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+
+    // 指定したストリーム上で非同期にカーネルを実行
+    displacement_sum<<<blocks, THREADS_PER_BLOCK, 0, data->stream>>>(
         k,
         delta_t,
         noise_scale,
@@ -260,24 +277,56 @@ extern "C"
         seed,
         length,
         force_x,
-        d_out_disp,
-        d_out_sq_disp);
+        data->d_out_disp,
+        data->d_out_sq_disp);
 
-    // GPUの計算がすべて終わるまでCPUを待機させる
-    cudaDeviceSynchronize();
+    // デバイスからホストへの結果転送もストリーム上で非同期に行う
+    cudaMemcpyAsync(data->h_out_disp, data->d_out_disp, sizeof(double), cudaMemcpyDeviceToHost, data->stream);
+    cudaMemcpyAsync(data->h_out_sq_disp, data->d_out_sq_disp, sizeof(double), cudaMemcpyDeviceToHost, data->stream);
 
-    // GPU上で計算した結果を、CPU側（ホスト側）の変数にコピーして持ってくる
-    double h_out_disp = 0;
-    double h_out_sq_disp = 0;
-    cudaMemcpy(&h_out_disp, d_out_disp, sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&h_out_sq_disp, d_out_sq_disp, sizeof(double), cudaMemcpyDeviceToHost);
+    // すべての非同期コマンド（カーネルとメモリ転送）の後にイベントを記録
+    cudaEventRecord(data->event, data->stream);
 
-    // Rust側から渡されたポインタに結果を代入する
-    *total_displacement = h_out_disp;
-    *total_square_displacement = h_out_sq_disp;
+    // コンテキストへのポインタを返す（Rust側からポーリングするため）
+    return (void*)data;
+}
 
-    // GPUのメモリを解放
-    cudaFree(d_out_disp);
-    cudaFree(d_out_sq_disp);
-  }
+/// GPUでの計算が終了しているかをポーリングして問い合わせる
+/// 完了していればリソースを解放し、結果を返す
+int query_calculate_displacement_sum_on_gpu(
+    void* handle,
+    double* total_displacement,
+    double* total_square_displacement)
+{
+    GpuTaskData* data = (GpuTaskData*)handle;
+    
+    cudaSetDevice(data->device_id);
+
+    // イベントの完了状態を問い合わせる
+    cudaError_t status = cudaEventQuery(data->event);
+    if (status == cudaSuccess) {
+        // 計算およびメモリ転送が完了しているので結果を取り出す
+        *total_displacement = *data->h_out_disp;
+        *total_square_displacement = *data->h_out_sq_disp;
+
+        // メモリとリソースを解放
+        cudaFree(data->d_out_disp);
+        cudaFree(data->d_out_sq_disp);
+        cudaFreeHost(data->h_out_disp);
+        cudaFreeHost(data->h_out_sq_disp);
+
+        cudaStreamDestroy(data->stream);
+        cudaEventDestroy(data->event);
+
+        delete data;
+        return 1; // 完了 (ready)
+    } else if (status == cudaErrorNotReady) {
+        return 0; // 実行中・未完了 (pending)
+    } else {
+        // エラー発生時
+        return -1; 
+    }
+}
+
+} // extern "C"
 }

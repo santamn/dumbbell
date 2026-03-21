@@ -1,6 +1,7 @@
 use nalgebra::Vector2;
+use rand::SeedableRng;
 use renderer::SimApp;
-use simulation::{DELTA_T, K};
+use simulation::{DELTA_T, K, STEPS};
 use statistics::statistics;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -12,7 +13,12 @@ mod simulation;
 mod statistics;
 
 fn main() {
-    record_statistics("002_gpu", 0.02);
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(0);
+    let mut particle = simulation::Particle::new(&mut rng, 0.02, Vector2::new(3.0, 0.0));
+    let start = particle.now().position.x;
+    let time = std::time::Instant::now();
+    println!("変位: {}", particle.nth(STEPS).unwrap().position.x - start);
+    println!("計算時間: {:.3?}秒", time.elapsed());
 }
 
 #[allow(dead_code)]
