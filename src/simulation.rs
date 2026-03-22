@@ -157,9 +157,9 @@ fn perpendicular_foot<W: Wall>(point: &Point2<f64>) -> Point2<f64> {
         // ニュートン法の更新式: x_next = x - (x - x_0 + f'(x) * (f(x) - y_0)) / (1 + f'(x)^2 - f''(x) * (f(x) - y_0))
         let d = (x - point.x + p * h) / (1.0 + p * p - W::SIGN * omega_derivative_second(x) * h);
 
-        (d.abs() > f64::EPSILON).then_some(x - d)
+        (d.abs() > 1e-10).then_some(x - d)
     })
-    .take(1000) // 1000回の更新で収束しない場合は諦める
+    .take(32) // 132回の更新で収束しない場合は諦める
     .last()
     .map(|x| Point2::new(x, W::SIGN * omega(x)))
     .unwrap_or(*point)

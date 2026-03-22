@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::ops::Range;
 use std::path::Path;
+use std::time::Instant;
 
 mod renderer;
 mod simulation;
@@ -21,7 +22,7 @@ fn single_particle_simulation(seed: u64, rod_length: f64, force: Vector2<f64>) {
     let mut rng = SmallRng::seed_from_u64(seed);
     let mut particle = Particle::new(&mut rng, rod_length, force);
     let start = particle.now().position.x;
-    let time = std::time::Instant::now();
+    let time = Instant::now();
     println!("変位: {}", particle.nth(STEPS).unwrap().position.x - start);
     println!("計算時間: {:.3?}秒", time.elapsed());
 }
@@ -67,7 +68,7 @@ fn record_statistics(folder_name: &str, length: f64) {
     let mut time_writer = BufWriter::new(File::create(path.join("time.dat")).unwrap());
     let mut alpha_writer = BufWriter::new(File::create(path.join("alpha.dat")).unwrap());
 
-    let start = std::time::Instant::now();
+    let start = Instant::now();
 
     for i in 1..=100 {
         let forward = statistics(length, i as f64);
