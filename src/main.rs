@@ -1,7 +1,7 @@
 use nalgebra::Vector2;
-use rand::SeedableRng;
+use rand::{SeedableRng, rngs::SmallRng};
 use renderer::SimApp;
-use simulation::{DELTA_T, K, STEPS};
+use simulation::{DELTA_T, K, Particle, STEPS};
 use statistics::statistics;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -13,8 +13,13 @@ mod simulation;
 mod statistics;
 
 fn main() {
-    let mut rng = rand::rngs::SmallRng::seed_from_u64(0);
-    let mut particle = simulation::Particle::new(&mut rng, 0.02, Vector2::new(3.0, 0.0));
+    record_statistics("002", 0.02);
+}
+
+#[allow(dead_code)]
+fn single_particle_simulation(seed: u64, rod_length: f64, force: Vector2<f64>) {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut particle = Particle::new(&mut rng, rod_length, force);
     let start = particle.now().position.x;
     let time = std::time::Instant::now();
     println!("変位: {}", particle.nth(STEPS).unwrap().position.x - start);
@@ -94,7 +99,12 @@ fn record_statistics(folder_name: &str, length: f64) {
                 / (forward.nonlinear_mobility + backward.nonlinear_mobility)
         )
         .unwrap();
+
+        mu_writer.flush().unwrap();
+        d_writer.flush().unwrap();
+        time_writer.flush().unwrap();
+        alpha_writer.flush().unwrap();
     }
 
-    writeln!(config, "計算時間: {:.2?}秒", start.elapsed()).unwrap();
+    writeln!(config, "計算時間: {:.3?}秒", start.elapsed()).unwrap();
 }
