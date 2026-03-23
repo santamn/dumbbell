@@ -85,7 +85,7 @@ fn record_statistics(folder_name: &str, length: f64) {
             .unwrap(),
     );
     let mut alpha_writer = BufWriter::new(
-        std::fs::OpenOptions::new()
+        OpenOptions::new()
             .create(true)
             .append(true)
             .open(path.join("alpha.dat"))
