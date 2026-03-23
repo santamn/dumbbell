@@ -17,7 +17,7 @@ libc = "0.2"
 cc = { version = "1.0", optional = true, features = ["parallel"] }
 
 [features]
-default = []
+default = ["gpu"]
 gpu = ["cc"]
 
 [profile.release]

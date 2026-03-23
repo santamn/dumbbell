@@ -3,7 +3,7 @@ use rand::{SeedableRng, rngs::SmallRng};
 use renderer::SimApp;
 use simulation::{DELTA_T, K, Particle, STEPS};
 use statistics::statistics;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::ops::Range;
 use std::path::Path;
@@ -14,7 +14,7 @@ mod simulation;
 mod statistics;
 
 fn main() {
-    run_animation(0, 1000, -1.0..3.0, 0.08, Vector2::new(2.0, 0.0));
+    record_statistics("len0.02_K1.5e6", 0.02);
 }
 
 #[allow(dead_code)]
@@ -63,13 +63,36 @@ fn record_statistics(folder_name: &str, length: f64) {
     writeln!(config, "バネ定数: {}", K).unwrap();
     writeln!(config, "棒の長さ: {}", length).unwrap();
 
-    let mut mu_writer = BufWriter::new(File::create(path.join("mu.dat")).unwrap());
-    let mut d_writer = BufWriter::new(File::create(path.join("d_eff.dat")).unwrap());
-    let mut time_writer = BufWriter::new(File::create(path.join("time.dat")).unwrap());
-    let mut alpha_writer = BufWriter::new(File::create(path.join("alpha.dat")).unwrap());
+    let mut mu_writer = BufWriter::new(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path.join("mu.dat"))
+            .unwrap(),
+    );
+    let mut d_writer = BufWriter::new(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path.join("d_eff.dat"))
+            .unwrap(),
+    );
+    let mut time_writer = BufWriter::new(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path.join("time.dat"))
+            .unwrap(),
+    );
+    let mut alpha_writer = BufWriter::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path.join("alpha.dat"))
+            .unwrap(),
+    );
 
     let start = Instant::now();
-
     for i in 1..=100 {
         let forward = statistics(length, i as f64);
         let backward = statistics(length, -(i as f64));
