@@ -37,7 +37,7 @@ mod backend {
         // 全てのアンサンブルを1つのGPU（device_id = 0）で行い、結果を同期的に待つ
         unsafe {
             calculate_displacement_sum_on_gpu(
-                0,
+                1,
                 K,
                 DELTA_T,
                 NOISE_SCALE,

@@ -24,7 +24,7 @@ fn single_particle_simulation(seed: u64, rod_length: f64, force: Vector2<f64>) {
     let start = particle.now().position.x;
     let time = Instant::now();
     println!("変位: {}", particle.nth(STEPS).unwrap().position.x - start);
-    println!("計算時間: {:.3?}秒", time.elapsed());
+    println!("計算時間: {:.3?}", time.elapsed());
 }
 
 #[allow(dead_code)]
@@ -130,5 +130,5 @@ fn record_statistics(folder_name: &str, length: f64) {
         alpha_writer.flush().unwrap();
     }
 
-    writeln!(config, "計算時間: {:.3?}秒", start.elapsed()).unwrap();
+    writeln!(config, "計算時間: {:.3?}", start.elapsed()).unwrap();
 }
