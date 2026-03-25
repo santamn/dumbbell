@@ -14,7 +14,7 @@ mod simulation;
 mod statistics;
 
 fn main() {
-    record_statistics("len0.02_K1.5e6", 0.02);
+    record_statistics("len0.01_K1.5e6", 0.01);
 }
 
 #[allow(dead_code)]
