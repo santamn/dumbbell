@@ -57,7 +57,7 @@ mod backend {
 
         Statistics {
             effective_diffusion: diffusion(mean_displacement, mean_square_displacement, TIME),
-            first_passage_time: 1.0 / mean_speed,
+            first_passage_time: 1.0 / mean_speed.abs(),
             nonlinear_mobility: nonlinear_mobility(mean_speed, force),
         }
     }
