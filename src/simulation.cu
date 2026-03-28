@@ -219,68 +219,11 @@ __global__ void displacement_sum(
   }
 }
 
-// extern "C" とすることでC++特有の名前修飾（マングリング）を防ぎ、Rustから呼び出せるようにする
-extern "C"
-{
-  void calculate_displacement_sum_on_gpu(
-      uint64_t device_id,
-      double k,
-      double delta_t,
-      double noise_scale,
-      uint64_t steps,
-      uint64_t ensemble_size,
-      unsigned long long seed,
-      double length,
-      double force_x,
-      double *total_displacement,
-      double *total_square_displacement)
-  {
-    // 対象のGPUデバイスを選択
-    cudaSetDevice(device_id);
-
-    // GPU上のメモリ領域を確保し、0で初期化
-    double *out_disp;
-    double *out_sq_disp;
-    cudaMalloc(&out_disp, sizeof(double));
-    cudaMalloc(&out_sq_disp, sizeof(double));
-    cudaMemset(out_disp, 0, sizeof(double));
-    cudaMemset(out_sq_disp, 0, sizeof(double));
-
-    // CUDAの実行構成（ブロックとスレッド）の決定
-    // 256スレッドを1ブロックとし、必要なブロック数を算出する
-    int blocks = (ensemble_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK; // ⌈ensemble_size / threads⌉
-
-    // カーネル（GPU関数）を起動
-    displacement_sum<<<blocks, THREADS_PER_BLOCK>>>(
-        k,
-        delta_t,
-        noise_scale,
-        steps,
-        ensemble_size,
-        seed,
-        length,
-        force_x,
-        out_disp,
-        out_sq_disp);
-
-    // GPUの計算がすべて終わるまでCPUを待機させる
-    cudaDeviceSynchronize();
-
-    // GPU上で計算した結果を、直接Rust側から渡されたCPU側のポインタにコピーする
-    cudaMemcpy(total_displacement, out_disp, sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(total_square_displacement, out_sq_disp, sizeof(double), cudaMemcpyDeviceToHost);
-
-    // GPUのメモリを解放
-    cudaFree(out_disp);
-    cudaFree(out_sq_disp);
-  }
-}
-
 // Rust側の非同期タスクへ結果をコールバックするためのコンテキスト情報
 struct AsyncContext
 {
-  void (*rust_callback)(double, double, void *); // Rustから渡された関数ポインタ
-  void *user_data;                               // Rustのチャネル情報（oneshot::Senderのポインタ）
+  void (*rust_callback)(void *, double, double); // Rustから渡された関数ポインタ
+  void *sender;                                  // Rustのチャネル情報（oneshot::Senderのポインタ）
   double *host_disp;                             // 結果を受け取るホスト側（CPU）の固定（Pinned）メモリ
   double *host_sq_disp;                          // 同上
   double *dev_disp;                              // GPU側のメモリ
@@ -294,7 +237,7 @@ void CUDART_CB cuda_callback_wrapper(void *user_data)
   auto context = static_cast<AsyncContext *>(user_data);
 
   // Rust側のコールバック関数を発火させ、計算結果とRustのチャネル情報を渡す
-  context->rust_callback(*context->host_disp, *context->host_sq_disp, context->user_data);
+  context->rust_callback(context->sender, *context->host_disp, *context->host_sq_disp);
 
   // このストリームで使ったメモリやリソースをすべてクリーンアップする
   cudaFreeHost(context->host_disp);
@@ -321,10 +264,10 @@ extern "C"
       unsigned long long seed,
       double length,
       double force_x,
-      void (*rust_callback)(double, double, void *), // GPU完了通知を送信するためのコールバック
-      void *user_data)                               // 任意のポインタ (今回はRustのChannelを持つ)
+      void (*rust_callback)(void *, double, double), // GPU完了通知を送信するためのコールバック
+      void *sender)                                  // 任意のポインタ (今回はRustのChannelを持つ)
   {
-    // 指定されたGPU（1~3等）を選択
+    // 指定されたGPUを選択
     cudaSetDevice(device_id);
 
     // デフォルトストリームの代わりに専用のストリームを作成し、非同期実行の単位とする
@@ -336,14 +279,11 @@ extern "C"
     double *dev_sq_disp;
     cudaMalloc(&dev_disp, sizeof(double));
     cudaMalloc(&dev_sq_disp, sizeof(double));
-
-    // ストリームを指定して非同期にメモリを0埋め
     cudaMemsetAsync(dev_disp, 0, sizeof(double), stream);
     cudaMemsetAsync(dev_sq_disp, 0, sizeof(double), stream);
 
-    int blocks = (ensemble_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-
     // ストリームを指定してカーネルを非同期に起動（CPUはここでブロックされず次へ進む）
+    int blocks = (ensemble_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
     displacement_sum<<<blocks, THREADS_PER_BLOCK, 0, stream>>>(
         k,
         delta_t,
@@ -356,7 +296,7 @@ extern "C"
         dev_disp,
         dev_sq_disp);
 
-    // ホスト（CPU）側のメモリを確保。
+    // ホスト（CPU）側のメモリを確保
     // 非同期コピー(cudaMemcpyAsync)には、ページングされない固定メモリ(Pinned Memory)である必要があるため cudaMallocHost を使う
     double *host_disp;
     double *host_sq_disp;
@@ -370,7 +310,7 @@ extern "C"
     // コールバック時に必要な情報を一まとめにする
     AsyncContext *cb_data = new AsyncContext{
         rust_callback,
-        user_data,
+        sender,
         host_disp,
         host_sq_disp,
         dev_disp,
@@ -378,8 +318,8 @@ extern "C"
         stream};
 
     // ストリームに登録されたタスク（カーネル実行やメモリコピー等）が全て完了した後に、
-    // 指定したコールバック関数（cuda_callback_wrapper）を呼び出すようスケジュールする。
-    // この関数はすぐにリターンし、実際の待機はCUDAドライバが行ってくれる（Zero-cost waiting）。
+    // 指定したコールバック関数（cuda_callback_wrapper）を呼び出すようスケジュールする
+    // この関数はすぐにリターンし、実際の待機はCUDAドライバが行ってくれる（Zero-cost waiting）
     cudaLaunchHostFunc(stream, cuda_callback_wrapper, cb_data);
   }
 }
