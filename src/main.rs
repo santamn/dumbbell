@@ -1,3 +1,4 @@
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use nalgebra::Vector2;
 use rand::{SeedableRng, rngs::SmallRng};
 use renderer::SimApp;
@@ -27,10 +28,10 @@ fn main() {
     });
 }
 
-// TODO: 全体での進捗率を表示する機能を追加する
-
 #[allow(dead_code)]
 async fn calculate_statistics(lengths: &[f64]) {
+    let m = MultiProgress::new();
+
     // 各GPUごとに同時に実行できるシミュレーションのケース数を制限するためのセマフォ
     // 大量のシミュレーションが一気にGPUに積まれてVRAM不足になるのを防ぐ
     let semaphores: Vec<Arc<Semaphore>> = GPU_IDS
@@ -38,16 +39,25 @@ async fn calculate_statistics(lengths: &[f64]) {
         .map(|_| Arc::new(Semaphore::new(2)))
         .collect();
 
+    let style = ProgressStyle::default_bar()
+        .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) - {msg}")
+        .unwrap()
+        .progress_chars("#>-");
+
     // 発行したすべてのシミュレーションが完了するのを待機する
     futures::future::join_all(lengths.iter().enumerate().map(|(i, &length)| {
         // lengthを順番に取り出し、シミュレーションをGPUにラウンドロビンで割り当てる
         let index = i % GPU_IDS.len(); // 0, 1, 2, 0, 1, 2...
         let semaphore = semaphores[index].clone();
 
+        let pb = m.add(ProgressBar::new(100));
+        pb.set_style(style.clone());
+        pb.set_message(format!("length: {:.2} (GPU {})", length, GPU_IDS[index]));
+
         tokio::spawn(async move {
             // このGPUに割り当てられた実行枠を取得するまで待機
             let _permit = semaphore.acquire().await.unwrap();
-            record_statistics(GPU_IDS[index], length).await;
+            record_statistics(GPU_IDS[index], length, pb).await;
             // ブロックを抜けると _permit がドロップされ、次のシミュレーションがこのGPUで実行可能になる
         })
     }))
@@ -55,7 +65,7 @@ async fn calculate_statistics(lengths: &[f64]) {
 }
 
 #[allow(dead_code)]
-async fn record_statistics(device_id: u64, length: f64) {
+async fn record_statistics(device_id: u64, length: f64, pb: ProgressBar) {
     let path = Path::new("data")
         .join(format!("K_{}", K))
         .join(format!("len_{:.2}", length));
@@ -109,7 +119,11 @@ async fn record_statistics(device_id: u64, length: f64) {
             alpha(forward.nonlinear_mobility, backward.nonlinear_mobility)
         )
         .unwrap();
+
+        pb.inc(1);
     }
+
+    pb.finish_with_message(format!("length: {:.2} (GPU {}) 完了", length, device_id));
 }
 
 #[allow(dead_code)]
