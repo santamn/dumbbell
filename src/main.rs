@@ -16,7 +16,8 @@ mod renderer;
 mod simulation;
 mod statistics;
 
-const GPU_IDS: [u64; 3] = [1, 2, 3];
+// GPU 3の性能が最も良いので、GPU 3を優先的に使うようにGPUのIDを指定する
+const GPU_IDS: [u64; 3] = [3, 1, 2];
 
 fn main() {
     let lengths = [0.03, 0.04, 0.05, 0.06, 0.07, 0.09, 0.1];
@@ -36,7 +37,7 @@ async fn calculate_statistics(lengths: &[f64]) {
     // 大量のシミュレーションが一気にGPUに積まれてVRAM不足になるのを防ぐ
     let semaphores: Vec<Arc<Semaphore>> = GPU_IDS
         .iter()
-        .map(|_| Arc::new(Semaphore::new(5)))
+        .map(|_| Arc::new(Semaphore::new(4)))
         .collect();
 
     let style = ProgressStyle::default_bar()
@@ -46,7 +47,7 @@ async fn calculate_statistics(lengths: &[f64]) {
 
     // 発行したすべてのシミュレーションが完了するのを待機する
     futures::future::join_all(lengths.iter().enumerate().map(|(i, &length)| {
-        // lengthを順番に取り出し、シミュレーションをGPUにラウンドロビンで割り当てる
+        // lengthを順番に取り出し、シミュレーションをGPUにラウンドロビン方式で割り当てる
         let index = i % GPU_IDS.len(); // 0, 1, 2, 0, 1, 2...
         let semaphore = semaphores[index].clone();
 
