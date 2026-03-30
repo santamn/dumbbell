@@ -33,7 +33,7 @@ mod backend {
 
         /// GPUを用いてアンサンブル平均の計算を非同期で行うC関数
         ///
-        /// 返り値はGPUへのコマンド送信をスケジュールした後に即座に返されるCUDAストリームのポインタであり、呼び出し元はこれを保持しておく必要がある。
+        /// 返り値はGPUへのコマンド送信をスケジュールした後に即座に返されるCUDAストリームのポインタであり、呼び出し元で破棄する必要がある
         unsafe fn async_calculate_displacements_sum_on_gpu(
             rust_callback: unsafe extern "C" fn(*mut c_void, f64, f64),
             sender: *mut c_void,
@@ -121,8 +121,9 @@ mod backend {
     impl Drop for AsyncCudaStream {
         fn drop(&mut self) {
             unsafe {
-                // タスクがキャンセルされた場合でも、GPU側の該当ストリームの処理が完了するのを同期的に待待機する。
-                // これにより、コールバック発火前に親のPinnedMemory（BulkPinnedBuffer）が解放されてUAFになることを未然に防ぐ。
+                // Tokioタスクがキャンセル（Drop）された場合でも、該当ストリームのGPU処理が完全に終わるまで同期的（OSスレッド）に待機する
+                // キャンセル後にPointersが再利用された際に古いストリームが遅れてメモリを上書きする危険や、
+                // C側に渡した生ポインタ (sender) を使ったコールバックが想定外のタイミングで発火する事態を未然に防ぐ
                 synchronize_cuda_stream(self.0);
                 destroy_cuda_stream(self.0);
             }
