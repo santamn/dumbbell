@@ -3,7 +3,7 @@ use nalgebra::Vector2;
 use rand::{SeedableRng, rngs::SmallRng};
 use renderer::SimApp;
 use simulation::{DELTA_T, K, Particle, STEPS};
-use statistics::{alpha, statistics};
+use statistics::{BulkPinnedBuffer, alpha, statistics};
 use std::fs::File;
 use std::io::Write;
 use std::ops::Range;
@@ -36,7 +36,7 @@ async fn calculate_statistics(lengths: &[f64]) {
     // 大量のシミュレーションが一気にGPUに積まれてVRAM不足になるのを防ぐ
     let semaphores: Vec<Arc<Semaphore>> = GPU_IDS
         .iter()
-        .map(|_| Arc::new(Semaphore::new(2)))
+        .map(|_| Arc::new(Semaphore::new(5)))
         .collect();
 
     let style = ProgressStyle::default_bar()
@@ -82,13 +82,20 @@ async fn record_statistics(device_id: u64, length: f64, pb: ProgressBar) {
     let mut alpha_dat = File::create(path.join("alpha.dat")).unwrap();
 
     // 外力1~100をそれぞれ順方向と逆方向の両方に印加するシミュレーションを非同期で計算するタスクを作成
+    let bulk_buffer = BulkPinnedBuffer::new(device_id, 200); // 100個の力に対して順方向と逆方向の両方を計算するので、200個分のバッファが必要
     let mut set: JoinSet<_> = (1..=100)
-        .map(|i| async move {
-            let (forward, backward) = tokio::join!(
-                statistics(device_id, length, i as f64),
-                statistics(device_id, length, -(i as f64))
-            );
-            (i, forward, backward)
+        .map(|i| {
+            // closureの外でポインタを取得しておくことで、bulk_bufferそのものがasync blockにmoveされるのを防ぐ
+            let forward_ptr = bulk_buffer.get_pointers(2 * i - 2);
+            let backward_ptr = bulk_buffer.get_pointers(2 * i - 1);
+
+            async move {
+                let (forward, backward) = tokio::join!(
+                    statistics(device_id, length, i as f64, forward_ptr),
+                    statistics(device_id, length, -(i as f64), backward_ptr)
+                );
+                (i, forward, backward)
+            }
         })
         .collect();
 

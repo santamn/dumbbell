@@ -6,7 +6,7 @@ pub struct Statistics {
     pub nonlinear_mobility: f64,
 }
 
-pub use backend::statistics;
+pub use backend::{BulkPinnedBuffer, statistics};
 
 #[cfg(feature = "gpu")]
 mod backend {
@@ -16,8 +16,29 @@ mod backend {
     use tokio::sync::oneshot;
 
     unsafe extern "C" {
+        /// Pinned Memoryを確保するための関数
+        unsafe fn alloc_pinned_f64_memories(n: usize) -> *mut f64;
+
+        /// Pinned Memoryを解放するための関数
+        unsafe fn free_pinned_f64_memories(ptr: *mut f64);
+
+        /// GPUの全ての作業が終わるまでCPUをブロックして待機する関数
+        unsafe fn synchronize_gpu_device(device_id: u64);
+
+        /// 特定のストリームの完了を同期的（OSレベル）に待機する関数
+        unsafe fn synchronize_cuda_stream(stream: *mut c_void);
+
+        /// GPUのストリームを破棄する関数
+        unsafe fn destroy_cuda_stream(stream: *mut c_void);
+
         /// GPUを用いてアンサンブル平均の計算を非同期で行うC関数
+        ///
+        /// 返り値はGPUへのコマンド送信をスケジュールした後に即座に返されるCUDAストリームのポインタであり、呼び出し元はこれを保持しておく必要がある。
         unsafe fn async_calculate_displacements_sum_on_gpu(
+            rust_callback: unsafe extern "C" fn(*mut c_void, f64, f64),
+            sender: *mut c_void,
+            host_disp_ptr: *mut f64,    // 確保済みのPinned Memory
+            host_sq_disp_ptr: *mut f64, // 同上
             device_id: u64,
             k: f64,
             delta_t: f64,
@@ -27,15 +48,87 @@ mod backend {
             seed: u64,
             length: f64,
             force_x: f64,
-            rust_callback: unsafe extern "C" fn(*mut c_void, f64, f64),
-            sender: *mut c_void,
-        );
+        ) -> *mut c_void;
     }
 
-    /// CUDA側の非同期処理が完了した際に呼び出されるコールバック関数
-    ///
-    /// Cの関数ポインタとして渡すため `extern "C"` を指定し、ユーザーデータとして
-    /// `oneshot::Sender` の生のポインタを一緒に受け取り、GPU計算の結果を非同期タスクに送信する
+    /// GPUと非同期通信するための一括確保されたPinned Memory（ページロックメモリ）を管理する構造体
+    pub struct BulkPinnedBuffer {
+        device_id: u64,
+        disp_array: *mut f64,
+        sq_disp_array: *mut f64,
+    }
+
+    // SAFETY: BulkPinnedBuffer は実質的にヒープ上に確保された CUDA ページロックメモリを所有する独自のラッパーであり、
+    //         Drop時に適切に解放されるため、Box と同様に Send と Sync の対象となる。
+    unsafe impl Send for BulkPinnedBuffer {}
+    unsafe impl Sync for BulkPinnedBuffer {}
+
+    impl BulkPinnedBuffer {
+        pub fn new(device_id: u64, total_tasks: usize) -> Self {
+            unsafe {
+                Self {
+                    device_id,
+                    disp_array: alloc_pinned_f64_memories(total_tasks),
+                    sq_disp_array: alloc_pinned_f64_memories(total_tasks),
+                }
+            }
+        }
+
+        /// 指定したインデックスの書き込み先ポインタを取得する
+        pub fn get_pointers(&self, index: usize) -> Pointers {
+            unsafe {
+                Pointers {
+                    // .add(index) は自動的に sizeof(f64) 分だけアドレスを計算する
+                    disp: self.disp_array.add(index),
+                    sq_disp: self.sq_disp_array.add(index),
+                }
+            }
+        }
+    }
+
+    impl Drop for BulkPinnedBuffer {
+        fn drop(&mut self) {
+            unsafe {
+                // メモリを解放する前に、GPUがこのメモリへの非同期書き込みをすべて完了するまで強制的にブロックする
+                synchronize_gpu_device(self.device_id);
+
+                // GPUが完全に止まったことが保証されたので、安全に解放する
+                free_pinned_f64_memories(self.disp_array);
+                free_pinned_f64_memories(self.sq_disp_array);
+            }
+        }
+    }
+
+    /// 各シミュレーションに渡すためのポインタのペア
+    #[derive(Clone, Copy)]
+    pub struct Pointers {
+        pub disp: *mut f64,
+        pub sq_disp: *mut f64,
+    }
+
+    // SAFETY: Pointers は BulkPinnedBuffer 内の互いに重複しない独立したインデックスの生ポインタペアであり、
+    //         各々のタスク（スレッド）で別々に扱われ GPU に送信するため、Send と Sync を実装しても安全である。
+    unsafe impl Send for Pointers {}
+    unsafe impl Sync for Pointers {}
+
+    /// CUDAストリーム(ポインタ)をラップし、SendとDropを実装するための構造体
+    struct AsyncCudaStream(*mut c_void);
+
+    // SAFETY: CUDAストリームはスレッド間で共有・送信しても安全なハンドルであり、
+    //         Drop実装で適切にクリーンアップされるため、Sendを実装しても安全
+    unsafe impl Send for AsyncCudaStream {}
+
+    impl Drop for AsyncCudaStream {
+        fn drop(&mut self) {
+            unsafe {
+                // タスクがキャンセルされた場合でも、GPU側の該当ストリームの処理が完了するのを同期的に待待機する。
+                // これにより、コールバック発火前に親のPinnedMemory（BulkPinnedBuffer）が解放されてUAFになることを未然に防ぐ。
+                synchronize_cuda_stream(self.0);
+                destroy_cuda_stream(self.0);
+            }
+        }
+    }
+
     unsafe extern "C" fn gpu_done_callback(sender: *mut c_void, disp_sum: f64, sq_disp_sum: f64) {
         // user_data として渡された生ポインタから Box<Sender> を復元し、リソースの所有権を取り戻す
         let sender = unsafe { Box::from_raw(sender as *mut oneshot::Sender<(f64, f64)>) };
@@ -46,16 +139,18 @@ mod backend {
     /// GPUを用いてアンサンブル平均を非同期で計算する関数
     ///
     /// この関数は呼び出されると直ちにGPUに計算を投げ、完了まで現在のTokioタスクをOSスレッドをブロックすることなく完全にスリープさせる
-    pub async fn statistics(device_id: u64, length: f64, force: f64) -> Statistics {
+    pub async fn statistics(device_id: u64, length: f64, force: f64, ptrs: Pointers) -> Statistics {
         // 結果を受け取るための1回限りの通信チャネル(oneshot)を作成
         let (tx, rx) = oneshot::channel::<(f64, f64)>();
-        // Cのコールバックに持たせるためにSenderをヒープに置き、所有権を放棄して生ポインタに変換する
-        let tx_ptr = Box::into_raw(Box::new(tx)) as *mut c_void;
 
-        unsafe {
+        let _stream = AsyncCudaStream(unsafe {
             // C側の非同期関数を呼び出す。GPUへのコマンド送信をスケジュールするだけで、
             // 関数自体は即座にリターンし、ブロックしない
             async_calculate_displacements_sum_on_gpu(
+                gpu_done_callback,
+                Box::into_raw(Box::new(tx)) as *mut c_void, // Cのコールバックに持たせるためにSenderをヒープに置き、所有権を放棄して生ポインタに変換する
+                ptrs.disp,
+                ptrs.sq_disp,
                 device_id,
                 K,
                 DELTA_T,
@@ -65,10 +160,8 @@ mod backend {
                 1,
                 length,
                 force,
-                gpu_done_callback,
-                tx_ptr,
-            );
-        }
+            )
+        });
 
         // CUDAの計算が終わって gpu_done_callback が呼ばれるまで、Tokioタスクを非同期待機させる
         let (disp_sum, sq_disp_sum) = rx.await.expect("GPUでの計算完了のコールバックの受信に失敗");
