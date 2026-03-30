@@ -4,27 +4,8 @@ use rand_distr::StandardNormal;
 use std::f64::consts::{PI, TAU};
 use std::ops::Add;
 
-/// 定数文脈で平方根を計算するためのニュートン法による近似関数
-const fn const_sqrt(x: f64) -> f64 {
-    assert!(
-        0.0 <= x && x <= 1.0,
-        "sqrt_constは0以上1以下の値に対してのみ定義されます"
-    );
-
-    let mut guess = 1.0;
-    let mut iterations = 0;
-    while iterations < 32 {
-        guess = 0.5 * (guess + x / guess);
-        iterations += 1;
-    }
-    guess
-}
-
-pub const DELTA_T: f64 = 2e-7; //                      シミュレーションの時間刻み
-pub const K: f64 = 1.5e6; //                           壁の反発力の強さ
-pub const NOISE_SCALE: f64 = const_sqrt(DELTA_T); //   ブラウン運動のノイズのスケール
-pub const TIME: f64 = 10.0; //                         総シミュレーションの時間
-pub const STEPS: usize = (TIME / DELTA_T) as usize; // シミュレーションの総ステップ数
+// シミュレーションの定数をbuild.rsで生成したコードからインクルード
+include!(concat!(env!("OUT_DIR"), "/constants.rs"));
 
 // チャネルの境界を表すトレイトと、その実装としての天井と床の構造体
 trait Wall {

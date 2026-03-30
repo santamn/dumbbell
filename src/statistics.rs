@@ -1,5 +1,3 @@
-const ENSEMBLE_SIZE: u64 = 30_000; // アンサンブル平均のサンプル数
-
 pub struct Statistics {
     pub effective_diffusion: f64,
     pub first_passage_time: f64,
@@ -10,8 +8,8 @@ pub use backend::{BulkPinnedBuffer, statistics};
 
 #[cfg(feature = "gpu")]
 mod backend {
-    use super::{ENSEMBLE_SIZE, Statistics, diffusion, nonlinear_mobility};
-    use crate::simulation::{DELTA_T, K, NOISE_SCALE, STEPS, TIME};
+    use super::{Statistics, diffusion, nonlinear_mobility};
+    use crate::simulation::{ENSEMBLE_SIZE, TIME};
     use std::ffi::c_void;
     use tokio::sync::oneshot;
 
@@ -25,13 +23,13 @@ mod backend {
         /// GPUの全ての作業が終わるまでCPUをブロックして待機する関数
         unsafe fn synchronize_gpu_device(device_id: u64);
 
-        /// 特定のストリームの完了を同期的（OSレベル）に待機する関数
+        /// 特定のストリームの完了を同期的に待機する関数
         unsafe fn synchronize_cuda_stream(stream: *mut c_void);
 
         /// GPUのストリームを破棄する関数
         unsafe fn destroy_cuda_stream(stream: *mut c_void);
 
-        /// GPUを用いてアンサンブル平均の計算を非同期で行うC関数
+        /// GPUを用いてシミュレーション結果の総和の計算を非同期で行う関数
         ///
         /// 返り値はGPUへのコマンド送信をスケジュールした後に即座に返されるCUDAストリームのポインタであり、呼び出し元で破棄する必要がある
         unsafe fn async_calculate_displacements_sum_on_gpu(
@@ -40,11 +38,6 @@ mod backend {
             host_disp_ptr: *mut f64,    // 確保済みのPinned Memory
             host_sq_disp_ptr: *mut f64, // 同上
             device_id: u64,
-            k: f64,
-            delta_t: f64,
-            noise_scale: f64,
-            steps: u64,
-            ensemble_size: u64,
             seed: u64,
             length: f64,
             force_x: f64,
@@ -145,19 +138,14 @@ mod backend {
         let (tx, rx) = oneshot::channel::<(f64, f64)>();
 
         let _stream = AsyncCudaStream(unsafe {
-            // C側の非同期関数を呼び出す。GPUへのコマンド送信をスケジュールするだけで、
-            // 関数自体は即座にリターンし、ブロックしない
+            // CUDAの非同期関数を呼び出す
+            // GPUへのコマンド送信をスケジュールするだけで関数自体は即座にリターンされるので、ブロックされない
             async_calculate_displacements_sum_on_gpu(
                 gpu_done_callback,
                 Box::into_raw(Box::new(tx)) as *mut c_void, // Cのコールバックに持たせるためにSenderをヒープに置き、所有権を放棄して生ポインタに変換する
                 ptrs.disp,
                 ptrs.sq_disp,
                 device_id,
-                K,
-                DELTA_T,
-                NOISE_SCALE,
-                STEPS as u64,
-                ENSEMBLE_SIZE,
                 1,
                 length,
                 force,
@@ -181,8 +169,8 @@ mod backend {
 
 #[cfg(not(feature = "gpu"))]
 mod backend {
-    use super::{ENSEMBLE_SIZE, Statistics, diffusion, nonlinear_mobility};
-    use crate::simulation::{Particle, STEPS, TIME};
+    use super::{Statistics, diffusion, nonlinear_mobility};
+    use crate::simulation::{ENSEMBLE_SIZE, Particle, STEPS, TIME};
     use nalgebra::Vector2;
     use rand::{SeedableRng, rngs::SmallRng};
     use rayon::prelude::*;

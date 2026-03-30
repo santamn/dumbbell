@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <float.h>
 
+#include "constants.h"
+
 constexpr int THREADS_PER_BLOCK = 256;
 constexpr int WARP_SIZE = 32;
 constexpr int WARPS_PER_BLOCK = THREADS_PER_BLOCK / WARP_SIZE;
@@ -63,7 +65,7 @@ __device__ double perpendicular_foot_x(double px, double py, double sign)
 }
 
 // 壁への沈み込みに対する反発力を計算する関数
-__device__ void repulsion(double k, double px, double py, double *fx, double *fy)
+__device__ void repulsion(double px, double py, double *fx, double *fy)
 {
   *fx = 0.0;
   *fy = 0.0;
@@ -76,17 +78,13 @@ __device__ void repulsion(double k, double px, double py, double *fx, double *fy
   double x = perpendicular_foot_x(px, py, sign);
   double y = sign * omega(x);
 
-  *fx = k * (x - px);
-  *fy = k * (y - py);
+  *fx = K * (x - px);
+  *fy = K * (y - py);
 }
 
 // 1粒子のシミュレーションを行い、最終的なx方向の変位を返す関数
 __device__ double simulate_particle(
-    double k,
-    double delta_t,
-    double noise_scale,
-    uint64_t steps,
-    unsigned long long seed,
+    uint64_t seed,
     int idx,
     double length,
     double inv_length,
@@ -106,7 +104,7 @@ __device__ double simulate_particle(
   double start_x = x;
 
   // 3. シミュレーションのメインループ
-  for (uint64_t t = 0; t < steps; ++t)
+  for (uint64_t t = 0; t < STEPS; ++t)
   {
     // ブラウン運動用の正規分布ノイズを生成
     double xi_x = curand_normal_double(&state);
@@ -127,10 +125,10 @@ __device__ double simulate_particle(
 
     // 壁からの反発力を計算
     double f1_x, f1_y;
-    repulsion(k, p1_x, p1_y, &f1_x, &f1_y);
+    repulsion(p1_x, p1_y, &f1_x, &f1_y);
 
     double f2_x, f2_y;
-    repulsion(k, p2_x, p2_y, &f2_x, &f2_y);
+    repulsion(p2_x, p2_y, &f2_x, &f2_y);
 
     // オイラー・丸山法による位置と角度の更新
     // x += (force_x + 0.5 * (f1_x + f2_x)) * delta_t + xi_x * noise_scale;
@@ -140,9 +138,9 @@ __device__ double simulate_particle(
     double force_sum_y = 0.5 * (f1_y + f2_y);
     double ext_prod = fma(-s, f1_x - f2_x, c * (f1_y - f2_y));
 
-    x = fma(force_sum_x, delta_t, fma(xi_x, noise_scale, x));
-    y = fma(force_sum_y, delta_t, fma(xi_y, noise_scale, y));
-    angle = fma(ext_prod * inv_length, delta_t, fma(2.0 * xi_phi * inv_length, noise_scale, angle));
+    x = fma(force_sum_x, DELTA_T, fma(xi_x, NOISE_SCALE, x));
+    y = fma(force_sum_y, DELTA_T, fma(xi_y, NOISE_SCALE, y));
+    angle = fma(ext_prod * inv_length, DELTA_T, fma(2.0 * xi_phi * inv_length, NOISE_SCALE, angle));
   }
 
   // 4. 最終的な変位を計算
@@ -186,12 +184,7 @@ __inline__ __device__ double warp_reduce_sum(double val)
 
 // 粒子の変位の総和と、変位の二乗の総和を計算するカーネル関数
 __global__ void displacements_sum(
-    double k,
-    double delta_t,
-    double noise_scale,
-    uint64_t steps,
-    uint64_t ensemble_size,
-    unsigned long long seed,
+    uint64_t seed,
     double length,
     double inv_length,
     double force_x,
@@ -208,9 +201,9 @@ __global__ void displacements_sum(
   double delta_x_sq = 0.0;
 
   // 2. 有効なスレッドでのみシミュレーションを実行
-  if (idx < ensemble_size)
+  if (idx < ENSEMBLE_SIZE)
   {
-    delta_x = simulate_particle(k, delta_t, noise_scale, steps, seed, idx, length, inv_length, force_x);
+    delta_x = simulate_particle(seed, idx, length, inv_length, force_x);
     delta_x_sq = delta_x * delta_x;
   }
 
@@ -266,18 +259,15 @@ struct AsyncContext
 void CUDART_CB cuda_callback_wrapper(void *user_data)
 {
   auto context = static_cast<AsyncContext *>(user_data);
-
   // Rust側のコールバック関数を発火させ、計算結果をチャネルに送信する
   context->rust_callback(context->sender, *context->host_disp, *context->host_sq_disp);
-
-  // コンテキストの解放
   delete context;
 }
 
 // C++側の名前修飾を防ぐため extern "C" ブロック内に非同期用の関数を作成
 extern "C"
 {
-  // Rust側でPinned Memoryを確保するための関数
+  // Rust側からPinned Memoryを確保するための関数
   double *alloc_pinned_f64_memories(size_t n)
   {
     double *ptr;
@@ -285,7 +275,7 @@ extern "C"
     return ptr;
   }
 
-  // Rust側でPinned Memoryを解放するための関数
+  // Rust側からPinned Memoryを解放するための関数
   void free_pinned_f64_memories(double *ptr)
   {
     cudaFreeHost(ptr);
@@ -298,7 +288,7 @@ extern "C"
     cudaDeviceSynchronize();
   }
 
-  // 特定のストリームの完了を同期的（OSレベル）で待機する関数
+  // 特定のストリームの完了を同期的に待機する関数
   void synchronize_cuda_stream(void *stream)
   {
     cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
@@ -310,17 +300,13 @@ extern "C"
     cudaStreamDestroy(static_cast<cudaStream_t>(stream));
   }
 
+  // GPUを用いてシミュレーション結果の総和の計算を非同期で行う関数
   void *async_calculate_displacements_sum_on_gpu(
       void (*rust_callback)(void *, double, double), // 計算結果を送るためのコールバック
       void *sender,                                  // 計算結果を送るためのチャネル （oneshot::Senderのポインタ）
       double *host_disp_ptr,                         // 確保済みのPinned Memory
       double *host_sq_disp_ptr,                      // 同上
       uint64_t device_id,                            // 使用するGPUのID
-      double k,                                      // ばね定数
-      double delta_t,                                // タイムステップ
-      double noise_scale,                            // ノイズの強さ
-      uint64_t steps,                                // シミュレーションのステップ数
-      uint64_t ensemble_size,                        // アンサンブルのサイズ
       uint64_t seed,                                 // 乱数のシード
       double length,                                 // 棒の長さ
       double force_x)                                // 外部から加える力の大きさ
@@ -342,19 +328,9 @@ extern "C"
     cudaMemsetAsync(dev_sq_disp, 0, sizeof(double), stream);
 
     // ストリームを指定してカーネルを非同期に起動（CPUはここでブロックされず次へ進む）
-    int blocks = (ensemble_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    displacements_sum<<<blocks, THREADS_PER_BLOCK, 0, stream>>>(
-        k,
-        delta_t,
-        noise_scale,
-        steps,
-        ensemble_size,
-        seed,
-        length,
-        1.0 / length, // inv_lengthを事前に計算して渡すことで、カーネル内での無駄な逆数計算を省略
-        force_x,
-        dev_disp,
-        dev_sq_disp);
+    int blocks = (ENSEMBLE_SIZE + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    displacements_sum<<<blocks, THREADS_PER_BLOCK, 0, stream>>>(seed, length, 1.0 / length, force_x, dev_disp, dev_sq_disp);
+    // inv_lengthを事前に計算して渡すことで、カーネル内での無駄な逆数計算を省略
 
     // デバイスからホストへ、計算結果を非同期ストリーム上でコピーする
     cudaMemcpyAsync(host_disp_ptr, dev_disp, sizeof(double), cudaMemcpyDeviceToHost, stream);
@@ -374,7 +350,7 @@ extern "C"
 
     // ストリームに登録されたタスク（カーネル実行やメモリコピー等）が全て完了した後に、
     // 指定したコールバック関数（cuda_callback_wrapper）を呼び出すようスケジュールする
-    // この関数はすぐにリターンし、実際の待機はCUDAドライバが行ってくれる（Zero-cost waiting）
+    // この関数はすぐにリターンし、実際の待機はCUDAドライバが行ってくれる
     cudaLaunchHostFunc(stream, cuda_callback_wrapper, cb_data);
 
     return stream;
