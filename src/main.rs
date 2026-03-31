@@ -5,7 +5,9 @@ use nalgebra::Vector2;
 use rand::{SeedableRng, rngs::SmallRng};
 use renderer::SimApp;
 use simulation::{DELTA_T, K, Particle, STEPS};
-use statistics::{alpha, statistics};
+use statistics::alpha;
+#[cfg(feature = "gpu")]
+use statistics::sweep_statistics;
 use std::fs::File;
 use std::io::Write;
 use std::ops::Range;
@@ -96,16 +98,12 @@ async fn record_statistics(
     let mut time_dat = File::create(path.join("time.dat")).unwrap();
     let mut alpha_dat = File::create(path.join("alpha.dat")).unwrap();
 
-    for i in 1..=100 {
-        let (forward, backward) = {
-            let (ctx1, mod1) = device_info.clone();
-            let (ctx2, mod2) = device_info.clone();
-            tokio::join!(
-                statistics(ctx1, mod1, length, i as f64),
-                statistics(ctx2, mod2, length, -(i as f64))
-            )
-        };
+    let (ctx, module) = device_info;
 
+    // 全ての計算を非同期（1つのブロック内）で並列に GPU に投げ、完了したものから受け取る流し込み処理
+    let mut rx = sweep_statistics(ctx, module, length, 100).await;
+
+    while let Some((i, forward, backward)) = rx.recv().await {
         writeln!(
             mu_dat,
             "{} {} {}",
