@@ -56,6 +56,7 @@ mod backend {
         dev_disp_array: *mut f64,
         dev_sq_disp_array: *mut f64,
         capacity: usize,
+        is_freed: bool,
     }
 
     // SAFETY: BulkBuffer はCUDAページロックメモリとデバイスメモリを管理するラッパーであり、
@@ -72,6 +73,7 @@ mod backend {
                     dev_disp_array: alloc_device_f64_memories(total_tasks, device_id),
                     dev_sq_disp_array: alloc_device_f64_memories(total_tasks, device_id),
                     capacity: total_tasks,
+                    is_freed: false,
                 }
             }
         }
@@ -90,10 +92,9 @@ mod backend {
                 }
             }
         }
-    }
 
-    impl Drop for BulkBuffer {
-        fn drop(&mut self) {
+        /// 正常完了時に呼び出し、非同期で安全にクリーンアップを行うメソッド
+        pub async fn dispose(&mut self) {
             let device_id = self.device_id;
             // 生ポインタはSendを実装していないため、usizeにキャストしてクロージャに渡す
             let disp_addr = self.disp_array as usize;
@@ -103,13 +104,37 @@ mod backend {
 
             // メモリを解放する前に、GPUがこのメモリへの非同期書き込みをすべて完了するまで待つ必要があるが、
             // 非同期ランタイムのワーカースレッドをブロックしないために spawn_blocking に逃がす
-            tokio::task::spawn_blocking(move || unsafe {
-                synchronize_gpu_device(device_id);
-                free_pinned_f64_memories(disp_addr as *mut f64);
-                free_pinned_f64_memories(sq_disp_addr as *mut f64);
-                free_device_f64_memories(dev_disp_addr as *mut f64, device_id);
-                free_device_f64_memories(dev_sq_disp_addr as *mut f64, device_id);
-            });
+            tokio::task::spawn_blocking(move || {
+                // ここは通常のOSスレッドなので、GPUの完了を待つためにブロックしても問題ない
+                unsafe {
+                    synchronize_gpu_device(device_id);
+                    free_pinned_f64_memories(disp_addr as *mut f64);
+                    free_pinned_f64_memories(sq_disp_addr as *mut f64);
+                    free_device_f64_memories(dev_disp_addr as *mut f64, device_id);
+                    free_device_f64_memories(dev_sq_disp_addr as *mut f64, device_id);
+                }
+            })
+            .await
+            .unwrap();
+
+            self.is_freed = true;
+        }
+    }
+
+    impl Drop for BulkBuffer {
+        fn drop(&mut self) {
+            if !self.is_freed {
+                // Drop時にまだ解放されていない場合は、ブロックしてでもリソースを解放する
+                // これは安全性を優先するための最後の手段であり、通常は dispose() を呼び出すべき
+                unsafe {
+                    synchronize_gpu_device(self.device_id);
+                    free_pinned_f64_memories(self.disp_array);
+                    free_pinned_f64_memories(self.sq_disp_array);
+                    free_device_f64_memories(self.dev_disp_array, self.device_id);
+                    free_device_f64_memories(self.dev_sq_disp_array, self.device_id);
+                }
+            }
+            self.is_freed = true;
         }
     }
 
