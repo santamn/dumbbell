@@ -304,6 +304,29 @@ extern "C"
     cudaDeviceSynchronize();
   }
 
+  // ストリームを一括で作成する関数
+  void **alloc_cuda_streams(size_t n, uint64_t device_id)
+  {
+    cudaSetDevice(device_id);
+    void **streams = new void *[n];
+    for (size_t i = 0; i < n; i++)
+    {
+      cudaStreamCreate((cudaStream_t *)&streams[i]);
+    }
+    return streams;
+  }
+
+  // ストリームを一括で破棄する関数
+  void free_cuda_streams(void **streams, size_t n, uint64_t device_id)
+  {
+    cudaSetDevice(device_id);
+    for (size_t i = 0; i < n; i++)
+    {
+      cudaStreamDestroy((cudaStream_t)streams[i]);
+    }
+    delete[] streams;
+  }
+
   // GPUを用いてシミュレーション結果の総和の計算を非同期で行う関数
   void async_calculate_displacements_sum_on_gpu(
       void (*rust_callback)(void *, double, double), // 計算結果を送るためのコールバック
@@ -312,6 +335,7 @@ extern "C"
       double *host_sq_disp_ptr,                      // 同上
       double *dev_disp_ptr,                          // 確保済みのDevice Memory
       double *dev_sq_disp_ptr,                       // 同上
+      void *stream_ptr,                              // 使用するCUDAストリームのポインタ
       uint64_t device_id,                            // 使用するGPUのID
       uint64_t seed,                                 // 乱数のシード
       double length,                                 // 棒の長さ
@@ -320,9 +344,8 @@ extern "C"
     // 指定されたGPUを選択
     cudaSetDevice(device_id);
 
-    // デフォルトストリームの代わりに専用のストリームを作成し、非同期実行の単位とする
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
+    // 引数で受け取ったストリームを使用する
+    cudaStream_t stream = (cudaStream_t)stream_ptr;
 
     // デバイスメモリの初期化
     cudaMemsetAsync(dev_disp_ptr, 0, sizeof(double), stream);
@@ -349,6 +372,5 @@ extern "C"
     // 指定したコールバック関数（cuda_callback_wrapper）を呼び出すようスケジュールする
     // この関数はすぐにリターンし、実際の待機はCUDAドライバが行ってくれる
     cudaLaunchHostFunc(stream, cuda_callback_wrapper, cb_data);
-    cudaStreamDestroy(stream);
   }
 }

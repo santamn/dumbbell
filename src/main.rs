@@ -3,7 +3,7 @@ use nalgebra::Vector2;
 use rand::{SeedableRng, rngs::SmallRng};
 use renderer::SimApp;
 use simulation::{DELTA_T, K, Particle, STEPS};
-use statistics::{BulkBuffer, alpha, statistics};
+use statistics::{GpuResources, alpha, statistics};
 use std::fs::File;
 use std::io::Write;
 use std::ops::Range;
@@ -84,12 +84,12 @@ async fn record_statistics(device_id: u64, length: f64, pb: ProgressBar) {
 
     // 外力1~100をそれぞれ順方向と逆方向の両方に印加するシミュレーションを非同期で計算するタスクを作成
     // 100個の力に対して順方向と逆方向の両方を計算するので、200個分のバッファが必要
-    let mut bulk_buffer = BulkBuffer::new(device_id, 200);
+    let mut gpu_resources = GpuResources::new(device_id, 200);
     let mut set: JoinSet<_> = (1..=100)
         .map(|i| {
-            // closureの外でポインタを取得しておくことで、bulk_bufferそのものがasync blockにmoveされるのを防ぐ
-            let forward_ptr = bulk_buffer.get_pointers(2 * i - 2);
-            let backward_ptr = bulk_buffer.get_pointers(2 * i - 1);
+            // closureの外でポインタを取得しておくことで、gpu_resourcesそのものがasync blockにmoveされるのを防ぐ
+            let forward_ptr = gpu_resources.get_pointers(2 * i - 2);
+            let backward_ptr = gpu_resources.get_pointers(2 * i - 1);
 
             async move {
                 let (forward, backward) = tokio::join!(
@@ -133,7 +133,7 @@ async fn record_statistics(device_id: u64, length: f64, pb: ProgressBar) {
     }
 
     // 全ての計算が終わった後にバッファを（OSスレッドをブロックさせずに）安全に解放
-    bulk_buffer.dispose().await;
+    gpu_resources.dispose().await;
 
     pb.finish_with_message(format!("length: {:.2} (GPU {}) 完了", length, device_id));
 }

@@ -4,7 +4,7 @@ pub struct Statistics {
     pub nonlinear_mobility: f64,
 }
 
-pub use backend::{BulkBuffer, statistics};
+pub use backend::{GpuResources, statistics};
 
 #[cfg(feature = "gpu")]
 mod backend {
@@ -34,6 +34,12 @@ mod backend {
         /// GPUの全ての作業が終わるまでCPUをブロックして待機する関数
         unsafe fn synchronize_gpu_device(device_id: u64);
 
+        /// ストリームを一括で作成する関数
+        unsafe fn alloc_cuda_streams(n: usize, device_id: u64) -> *mut *mut c_void;
+
+        /// ストリームを一括で破棄する関数
+        unsafe fn free_cuda_streams(streams: *mut *mut c_void, n: usize, device_id: u64);
+
         /// GPUを用いてシミュレーション結果の総和の計算を非同期で行う関数
         unsafe fn async_calculate_displacements_sum_on_gpu(
             rust_callback: unsafe extern "C" fn(*mut c_void, f64, f64), // 計算結果を送るためのコールバック
@@ -42,6 +48,7 @@ mod backend {
             host_sq_disp_ptr: *mut f64, // 同上
             dev_disp_ptr: *mut f64, // 事前確保済みのデバイスメモリ
             dev_sq_disp_ptr: *mut f64, // 同上
+            stream_ptr: *mut c_void, // 事前確保済みのCUDAストリーム
             device_id: u64,
             seed: u64,
             length: f64,
@@ -50,21 +57,22 @@ mod backend {
     }
 
     /// GPUと非同期通信するための一括確保されたページロックメモリとデバイスメモリを管理する構造体
-    pub struct BulkBuffer {
+    pub struct GpuResources {
         device_id: u64,
         disp_array: *mut f64,
         sq_disp_array: *mut f64,
         dev_disp_array: *mut f64,
         dev_sq_disp_array: *mut f64,
+        streams_array: *mut *mut c_void,
         capacity: usize,
         is_freed: bool,
     }
 
-    // SAFETY: BulkBuffer はCUDAページロックメモリとデバイスメモリを管理するラッパーであり、
+    // SAFETY: GpuResources はCUDAページロックメモリとデバイスメモリを管理するラッパーであり、
     //         Drop時に適切に解放されるため、Box と同様に Send の対象となる
-    unsafe impl Send for BulkBuffer {}
+    unsafe impl Send for GpuResources {}
 
-    impl BulkBuffer {
+    impl GpuResources {
         pub fn new(device_id: u64, total_tasks: usize) -> Self {
             unsafe {
                 Self {
@@ -73,6 +81,7 @@ mod backend {
                     sq_disp_array: alloc_pinned_f64_memories(total_tasks),
                     dev_disp_array: alloc_device_f64_memories(total_tasks, device_id),
                     dev_sq_disp_array: alloc_device_f64_memories(total_tasks, device_id),
+                    streams_array: alloc_cuda_streams(total_tasks, device_id),
                     capacity: total_tasks,
                     is_freed: false,
                 }
@@ -90,6 +99,7 @@ mod backend {
                     sq_disp: self.sq_disp_array.add(index),
                     dev_disp: self.dev_disp_array.add(index),
                     dev_sq_disp: self.dev_sq_disp_array.add(index),
+                    stream: *self.streams_array.add(index),
                 }
             }
         }
@@ -102,6 +112,8 @@ mod backend {
             let sq_disp_addr = self.sq_disp_array as usize;
             let dev_disp_addr = self.dev_disp_array as usize;
             let dev_sq_disp_addr = self.dev_sq_disp_array as usize;
+            let streams_addr = self.streams_array as usize;
+            let capacity = self.capacity;
 
             // メモリを解放する前に、GPUがこのメモリへの非同期書き込みをすべて完了するまで待つ必要があるが、
             // 非同期ランタイムのワーカースレッドをブロックしないために spawn_blocking に逃がす
@@ -113,6 +125,7 @@ mod backend {
                     free_pinned_f64_memories(sq_disp_addr as *mut f64);
                     free_device_f64_memories(dev_disp_addr as *mut f64, device_id);
                     free_device_f64_memories(dev_sq_disp_addr as *mut f64, device_id);
+                    free_cuda_streams(streams_addr as *mut *mut c_void, capacity, device_id);
                 }
             })
             .await
@@ -122,7 +135,7 @@ mod backend {
         }
     }
 
-    impl Drop for BulkBuffer {
+    impl Drop for GpuResources {
         fn drop(&mut self) {
             if !self.is_freed {
                 // Drop時にまだ解放されていない場合は、ブロックしてでもリソースを解放する
@@ -133,6 +146,7 @@ mod backend {
                     free_pinned_f64_memories(self.sq_disp_array);
                     free_device_f64_memories(self.dev_disp_array, self.device_id);
                     free_device_f64_memories(self.dev_sq_disp_array, self.device_id);
+                    free_cuda_streams(self.streams_array, self.capacity, self.device_id);
                 }
             }
             self.is_freed = true;
@@ -146,14 +160,15 @@ mod backend {
         pub sq_disp: *mut f64,
         pub dev_disp: *mut f64,
         pub dev_sq_disp: *mut f64,
+        pub stream: *mut c_void,
     }
 
     // SAFETY:
-    //  1. スレッド非依存: Pointers はスレッドローカルストレージではなく、OS/CUDAによって割り当てられたグローバルな領域であるため、
+    //  1. スレッド非依存: Pointersはスレッドローカルストレージではなく、OS/CUDAによって割り当てられたグローバルな領域であるため、
     //                 別スレッドへ移動しても有効
-    //  2. 排他性: 各タスクにはBulkBuffer内の重複しない一意のインデックスを指すポインタが割り当てられるため、
+    //  2. 排他性: 各タスクにはGpuResources内の重複しない一意のインデックスを指すポインタが割り当てられるため、
     //            別々のスレッドにSendされて各々が独立して書き込みを行っても、エイリアシングによる未定義動作は発生しない
-    //  3. 寿命: 参照先のメモリは親となるBulkBufferが破棄されるまで（すべてのGPUタスクが終わるまで）有効である
+    //  3. 寿命: 参照先のメモリは親となるGpuResourcesが破棄されるまで（すべてのGPUタスクが終わるまで）有効である
     unsafe impl Send for Pointers {}
 
     // CUDAドライバからの通知をOSスレッドで受け取るためのメッセージ
@@ -222,6 +237,7 @@ mod backend {
                 ptrs.sq_disp,
                 ptrs.dev_disp,
                 ptrs.dev_sq_disp,
+                ptrs.stream,
                 device_id,
                 hasher.finish(),
                 length,
