@@ -15,6 +15,7 @@ mod backend {
     use std::sync::OnceLock;
     use std::sync::mpsc;
     use std::thread;
+    use std::time::Duration;
     use tokio::sync::oneshot;
 
     unsafe extern "C" {
@@ -229,7 +230,11 @@ mod backend {
         }
 
         // CUDAの計算が終わって gpu_done_callback が呼ばれるまで、Tokioタスクを非同期待機させる
-        let (disp_sum, sq_disp_sum) = rx.await.expect("GPUでの計算完了のコールバックの受信に失敗");
+        // 万が一CUDA側で致命的なエラーが発生してコールバックが呼ばれない場合に備えて24時間でタイムアウトさせる
+        let (disp_sum, sq_disp_sum) = tokio::time::timeout(Duration::from_hours(24), rx)
+            .await
+            .expect("GPUタスクがタイムアウトしました。CUDAでエラー・デッドロックが発生した可能性があります")
+            .expect("GPUでの計算完了のコールバックの受信に失敗");
 
         let mean_displacement = disp_sum / ENSEMBLE_SIZE as f64;
         let mean_square_displacement = sq_disp_sum / ENSEMBLE_SIZE as f64;

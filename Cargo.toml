@@ -13,7 +13,12 @@ nalgebra = "0.34.1"
 rand = "0.10.0"
 rand_distr = "0.6.0"
 rayon = "1.11.0"
-tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1.50.0", features = [
+  "rt-multi-thread",
+  "macros",
+  "sync",
+  "time",
+] }
 
 [build-dependencies]
 cc = { version = "1.0", optional = true, features = ["parallel"] }
