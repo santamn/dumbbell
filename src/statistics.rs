@@ -11,6 +11,7 @@ mod backend {
     use super::{Statistics, diffusion, nonlinear_mobility};
     use crate::simulation::{ENSEMBLE_SIZE, TIME};
     use std::ffi::c_void;
+    use std::hash::{DefaultHasher, Hash, Hasher};
     use tokio::sync::oneshot;
 
     unsafe extern "C" {
@@ -75,7 +76,7 @@ mod backend {
 
             unsafe {
                 Pointers {
-                    // .add(index) は自動的に sizeof(f64) 分だけアドレスを計算する
+                    // .add(index) は自動的に sizeof(f64)*index 分だけアドレスを加算する
                     disp: self.disp_array.add(index),
                     sq_disp: self.sq_disp_array.add(index),
                 }
@@ -138,6 +139,11 @@ mod backend {
     ///
     /// この関数は呼び出されると直ちにGPUに計算を投げ、完了まで現在のTokioタスクをOSスレッドをブロックすることなく完全にスリープさせる
     pub async fn statistics(device_id: u64, length: f64, force: f64, ptrs: Pointers) -> Statistics {
+        // 長さと外力からハッシュ値を生成して、GPU側の乱数生成器のシードとして利用する
+        let mut hasher = DefaultHasher::new();
+        length.to_bits().hash(&mut hasher);
+        force.to_bits().hash(&mut hasher);
+
         // 結果を受け取るための1回限りの通信チャネル(oneshot)を作成
         let (tx, rx) = oneshot::channel::<(f64, f64)>();
 
@@ -146,11 +152,12 @@ mod backend {
             // GPUへのコマンド送信をスケジュールするだけで関数自体は即座にリターンされるので、ブロックされない
             async_calculate_displacements_sum_on_gpu(
                 gpu_done_callback,
-                Box::into_raw(Box::new(tx)) as *mut c_void, // Cのコールバックに持たせるためにSenderをヒープに置き、所有権を放棄して生ポインタに変換する
+                // Cのコールバックに持たせるためにSenderをヒープに置き、所有権を放棄して生ポインタに変換する
+                Box::into_raw(Box::new(tx)) as *mut c_void,
                 ptrs.disp,
                 ptrs.sq_disp,
                 device_id,
-                1,
+                hasher.finish(),
                 length,
                 force,
             )
