@@ -288,20 +288,8 @@ extern "C"
     cudaDeviceSynchronize();
   }
 
-  // 特定のストリームの完了を同期的に待機する関数
-  void synchronize_cuda_stream(void *stream)
-  {
-    cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
-  }
-
-  // GPUのストリームを破棄する関数
-  void destroy_cuda_stream(void *stream)
-  {
-    cudaStreamDestroy(static_cast<cudaStream_t>(stream));
-  }
-
   // GPUを用いてシミュレーション結果の総和の計算を非同期で行う関数
-  void *async_calculate_displacements_sum_on_gpu(
+  void async_calculate_displacements_sum_on_gpu(
       void (*rust_callback)(void *, double, double), // 計算結果を送るためのコールバック
       void *sender,                                  // 計算結果を送るためのチャネル （oneshot::Senderのポインタ）
       double *host_disp_ptr,                         // 確保済みのPinned Memory
@@ -352,7 +340,6 @@ extern "C"
     // 指定したコールバック関数（cuda_callback_wrapper）を呼び出すようスケジュールする
     // この関数はすぐにリターンし、実際の待機はCUDAドライバが行ってくれる
     cudaLaunchHostFunc(stream, cuda_callback_wrapper, cb_data);
-
-    return stream;
+    cudaStreamDestroy(stream);
   }
 }

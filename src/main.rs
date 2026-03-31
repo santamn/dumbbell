@@ -83,7 +83,8 @@ async fn record_statistics(device_id: u64, length: f64, pb: ProgressBar) {
     let mut alpha_dat = File::create(path.join("alpha.dat")).unwrap();
 
     // 外力1~100をそれぞれ順方向と逆方向の両方に印加するシミュレーションを非同期で計算するタスクを作成
-    let bulk_buffer = BulkPinnedBuffer::new(device_id, 200); // 100個の力に対して順方向と逆方向の両方を計算するので、200個分のバッファが必要
+    // 100個の力に対して順方向と逆方向の両方を計算するので、200個分のバッファが必要
+    let bulk_buffer = BulkPinnedBuffer::new(device_id, 200);
     let mut set: JoinSet<_> = (1..=100)
         .map(|i| {
             // closureの外でポインタを取得しておくことで、bulk_bufferそのものがasync blockにmoveされるのを防ぐ
