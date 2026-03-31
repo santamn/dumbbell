@@ -1,43 +1,53 @@
+#[cfg(feature = "gpu")]
+use cudarc::driver::{CudaContext, CudaModule};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use nalgebra::Vector2;
 use rand::{SeedableRng, rngs::SmallRng};
 use renderer::SimApp;
 use simulation::{DELTA_T, K, Particle, STEPS};
-use statistics::{GpuResources, alpha, statistics};
+use statistics::{alpha, statistics};
 use std::fs::File;
 use std::io::Write;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::{sync::Semaphore, task::JoinSet};
+use tokio::sync::Semaphore;
 
 mod renderer;
 mod simulation;
 mod statistics;
 
-// GPU 3の性能が最も良いので、GPU 3を優先的に使うようにGPUのIDを指定する
 const GPU_IDS: [u64; 3] = [3, 1, 2];
 
 fn main() {
     let lengths = [0.03, 0.04, 0.05, 0.06, 0.07, 0.09, 0.1];
-    // Tokio のランタイム（非同期実行エンジン）を明示的に立ち上げる
     let rt = tokio::runtime::Runtime::new().unwrap();
-    // 立ち上げたエンジンの上で非同期のメイン処理を実行し、全て終わるまで同期的にブロックして待つ
     rt.block_on(async {
         calculate_statistics(&lengths).await;
     });
 }
 
 #[allow(dead_code)]
+#[cfg(feature = "gpu")]
 async fn calculate_statistics(lengths: &[f64]) {
     let m = MultiProgress::new();
 
-    // 各GPUごとに同時に実行できるシミュレーションのケース数を制限するためのセマフォ
-    // 大量のシミュレーションが一気にGPUに積まれてVRAM不足になるのを防ぐ
     let semaphores: Vec<Arc<Semaphore>> = GPU_IDS
         .iter()
         .map(|_| Arc::new(Semaphore::new(4)))
+        .collect();
+
+    let devices: Vec<(Arc<CudaContext>, Arc<CudaModule>)> = GPU_IDS
+        .iter()
+        .map(|&id| {
+            let ctx = CudaContext::new(id as usize).unwrap();
+            let ptx = cudarc::nvrtc::Ptx::from_binary(
+                include_bytes!(concat!(env!("OUT_DIR"), "/simulation.cubin")).to_vec(),
+            );
+            let module = ctx.load_module(ptx).unwrap();
+            (ctx, module)
+        })
         .collect();
 
     let style = ProgressStyle::default_bar()
@@ -45,28 +55,32 @@ async fn calculate_statistics(lengths: &[f64]) {
         .unwrap()
         .progress_chars("#>-");
 
-    // 発行したすべてのシミュレーションが完了するのを待機する
     futures::future::join_all(lengths.iter().enumerate().map(|(i, &length)| {
-        // lengthを順番に取り出し、シミュレーションをGPUにラウンドロビン方式で割り当てる
-        let index = i % GPU_IDS.len(); // 0, 1, 2, 0, 1, 2...
+        let index = i % GPU_IDS.len();
         let semaphore = semaphores[index].clone();
+
+        let device_info = devices[index].clone();
+        let current_gpu_id = GPU_IDS[index];
 
         let pb = m.add(ProgressBar::new(100));
         pb.set_style(style.clone());
-        pb.set_message(format!("length: {:.2} (GPU {})", length, GPU_IDS[index]));
+        pb.set_message(format!("length: {:.2} (GPU {})", length, current_gpu_id));
 
         tokio::spawn(async move {
-            // このGPUに割り当てられた実行枠を取得するまで待機
             let _permit = semaphore.acquire().await.unwrap();
-            record_statistics(GPU_IDS[index], length, pb).await;
-            // ブロックを抜けると _permit がドロップされ、次のシミュレーションがこのGPUで実行可能になる
+            record_statistics(device_info, current_gpu_id, length, pb).await;
         })
     }))
     .await;
 }
 
-#[allow(dead_code)]
-async fn record_statistics(device_id: u64, length: f64, pb: ProgressBar) {
+#[cfg(feature = "gpu")]
+async fn record_statistics(
+    device_info: (Arc<CudaContext>, Arc<CudaModule>),
+    device_id: u64,
+    length: f64,
+    pb: ProgressBar,
+) {
     let path = Path::new("data")
         .join(format!("new_K_{}", K))
         .join(format!("len_{:.2}", length));
@@ -82,27 +96,16 @@ async fn record_statistics(device_id: u64, length: f64, pb: ProgressBar) {
     let mut time_dat = File::create(path.join("time.dat")).unwrap();
     let mut alpha_dat = File::create(path.join("alpha.dat")).unwrap();
 
-    // 外力1~100をそれぞれ順方向と逆方向の両方に印加するシミュレーションを非同期で計算するタスクを作成
-    // 100個の力に対して順方向と逆方向の両方を計算するので、200個分のバッファが必要
-    let mut gpu_resources = GpuResources::new(device_id, 200);
-    let mut set: JoinSet<_> = (1..=100)
-        .map(|i| {
-            // closureの外でポインタを取得しておくことで、gpu_resourcesそのものがasync blockにmoveされるのを防ぐ
-            let forward_ptr = gpu_resources.get_pointers(2 * i - 2);
-            let backward_ptr = gpu_resources.get_pointers(2 * i - 1);
+    for i in 1..=100 {
+        let (forward, backward) = {
+            let (ctx1, mod1) = device_info.clone();
+            let (ctx2, mod2) = device_info.clone();
+            tokio::join!(
+                statistics(ctx1, mod1, length, i as f64),
+                statistics(ctx2, mod2, length, -(i as f64))
+            )
+        };
 
-            async move {
-                let (forward, backward) = tokio::join!(
-                    statistics(device_id, length, i as f64, forward_ptr),
-                    statistics(device_id, length, -(i as f64), backward_ptr)
-                );
-                (i, forward, backward)
-            }
-        })
-        .collect();
-
-    // 生成したタスクが完了したものから順に取り出し、ファイルに書き込む
-    while let Some(Ok((i, forward, backward))) = set.join_next().await {
         writeln!(
             mu_dat,
             "{} {} {}",
@@ -131,9 +134,6 @@ async fn record_statistics(device_id: u64, length: f64, pb: ProgressBar) {
 
         pb.inc(1);
     }
-
-    // 全ての計算が終わった後にバッファを（OSスレッドをブロックさせずに）安全に解放
-    gpu_resources.dispose().await;
 
     pb.finish_with_message(format!("length: {:.2} (GPU {}) 完了", length, device_id));
 }

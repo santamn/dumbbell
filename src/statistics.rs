@@ -4,253 +4,64 @@ pub struct Statistics {
     pub nonlinear_mobility: f64,
 }
 
-pub use backend::{GpuResources, statistics};
+pub use backend::statistics;
 
 #[cfg(feature = "gpu")]
 mod backend {
     use super::{Statistics, diffusion, nonlinear_mobility};
     use crate::simulation::{ENSEMBLE_SIZE, TIME};
-    use std::ffi::c_void;
+    use cudarc::driver::{CudaContext, CudaModule, LaunchConfig, PushKernelArg};
     use std::hash::{DefaultHasher, Hash, Hasher};
-    use std::sync::OnceLock;
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration;
-    use tokio::sync::oneshot;
+    use std::sync::Arc;
+    use tokio::task::spawn_blocking;
 
-    unsafe extern "C" {
-        /// Pinned Memoryを確保するための関数
-        unsafe fn alloc_pinned_f64_memories(n: usize) -> *mut f64;
-
-        /// Pinned Memoryを解放するための関数
-        unsafe fn free_pinned_f64_memories(ptr: *mut f64);
-
-        /// Device Memoryを確保するための関数
-        unsafe fn alloc_device_f64_memories(n: usize, device_id: u64) -> *mut f64;
-
-        /// Device Memoryを解放するための関数
-        unsafe fn free_device_f64_memories(ptr: *mut f64, device_id: u64);
-
-        /// GPUの全ての作業が終わるまでCPUをブロックして待機する関数
-        unsafe fn synchronize_gpu_device(device_id: u64);
-
-        /// ストリームを一括で作成する関数
-        unsafe fn alloc_cuda_streams(n: usize, device_id: u64) -> *mut *mut c_void;
-
-        /// ストリームを一括で破棄する関数
-        unsafe fn free_cuda_streams(streams: *mut *mut c_void, n: usize, device_id: u64);
-
-        /// GPUを用いてシミュレーション結果の総和の計算を非同期で行う関数
-        unsafe fn async_calculate_displacements_sum_on_gpu(
-            rust_callback: unsafe extern "C" fn(*mut c_void, f64, f64), // 計算結果を送るためのコールバック
-            sender: *mut c_void, // 計算結果を送るためのチャネル （oneshot::Senderのポインタ）
-            host_disp_ptr: *mut f64, // 確保済みのPinned Memory
-            host_sq_disp_ptr: *mut f64, // 同上
-            dev_disp_ptr: *mut f64, // 事前確保済みのデバイスメモリ
-            dev_sq_disp_ptr: *mut f64, // 同上
-            stream_ptr: *mut c_void, // 事前確保済みのCUDAストリーム
-            device_id: u64,
-            seed: u64,
-            length: f64,
-            force_x: f64,
-        );
-    }
-
-    /// GPUと非同期通信するための一括確保されたページロックメモリとデバイスメモリを管理する構造体
-    pub struct GpuResources {
-        device_id: u64,
-        disp_array: *mut f64,
-        sq_disp_array: *mut f64,
-        dev_disp_array: *mut f64,
-        dev_sq_disp_array: *mut f64,
-        streams_array: *mut *mut c_void,
-        capacity: usize,
-        is_freed: bool,
-    }
-
-    // SAFETY: GpuResources はCUDAページロックメモリとデバイスメモリを管理するラッパーであり、
-    //         Drop時に適切に解放されるため、Box と同様に Send の対象となる
-    unsafe impl Send for GpuResources {}
-
-    impl GpuResources {
-        pub fn new(device_id: u64, total_tasks: usize) -> Self {
-            unsafe {
-                Self {
-                    device_id,
-                    disp_array: alloc_pinned_f64_memories(total_tasks),
-                    sq_disp_array: alloc_pinned_f64_memories(total_tasks),
-                    dev_disp_array: alloc_device_f64_memories(total_tasks, device_id),
-                    dev_sq_disp_array: alloc_device_f64_memories(total_tasks, device_id),
-                    streams_array: alloc_cuda_streams(total_tasks, device_id),
-                    capacity: total_tasks,
-                    is_freed: false,
-                }
-            }
-        }
-
-        /// 指定したインデックスの書き込み先ポインタを取得する
-        pub fn get_pointers(&self, index: usize) -> Pointers {
-            assert!(index < self.capacity); // 安全のため、インデックスが容量内に収まっていることを確認する
-
-            unsafe {
-                Pointers {
-                    // .add(index) は自動的に sizeof(f64)*index 分だけアドレスを加算する
-                    disp: self.disp_array.add(index),
-                    sq_disp: self.sq_disp_array.add(index),
-                    dev_disp: self.dev_disp_array.add(index),
-                    dev_sq_disp: self.dev_sq_disp_array.add(index),
-                    stream: *self.streams_array.add(index),
-                }
-            }
-        }
-
-        /// 正常完了時に呼び出し、非同期で安全にクリーンアップを行うメソッド
-        pub async fn dispose(&mut self) {
-            let device_id = self.device_id;
-            // 生ポインタはSendを実装していないため、usizeにキャストしてクロージャに渡す
-            let disp_addr = self.disp_array as usize;
-            let sq_disp_addr = self.sq_disp_array as usize;
-            let dev_disp_addr = self.dev_disp_array as usize;
-            let dev_sq_disp_addr = self.dev_sq_disp_array as usize;
-            let streams_addr = self.streams_array as usize;
-            let capacity = self.capacity;
-
-            // メモリを解放する前に、GPUがこのメモリへの非同期書き込みをすべて完了するまで待つ必要があるが、
-            // 非同期ランタイムのワーカースレッドをブロックしないために spawn_blocking に逃がす
-            tokio::task::spawn_blocking(move || {
-                // ここは通常のOSスレッドなので、GPUの完了を待つためにブロックしても問題ない
-                unsafe {
-                    synchronize_gpu_device(device_id);
-                    free_pinned_f64_memories(disp_addr as *mut f64);
-                    free_pinned_f64_memories(sq_disp_addr as *mut f64);
-                    free_device_f64_memories(dev_disp_addr as *mut f64, device_id);
-                    free_device_f64_memories(dev_sq_disp_addr as *mut f64, device_id);
-                    free_cuda_streams(streams_addr as *mut *mut c_void, capacity, device_id);
-                }
-            })
-            .await
-            .unwrap();
-
-            self.is_freed = true;
-        }
-    }
-
-    impl Drop for GpuResources {
-        fn drop(&mut self) {
-            if !self.is_freed {
-                // Drop時にまだ解放されていない場合は、ブロックしてでもリソースを解放する
-                // これは安全性を優先するための最後の手段であり、通常は dispose() を呼び出すべき
-                unsafe {
-                    synchronize_gpu_device(self.device_id);
-                    free_pinned_f64_memories(self.disp_array);
-                    free_pinned_f64_memories(self.sq_disp_array);
-                    free_device_f64_memories(self.dev_disp_array, self.device_id);
-                    free_device_f64_memories(self.dev_sq_disp_array, self.device_id);
-                    free_cuda_streams(self.streams_array, self.capacity, self.device_id);
-                }
-            }
-            self.is_freed = true;
-        }
-    }
-
-    /// 各シミュレーションに渡すためのポインタのセット
-    #[derive(Clone, Copy)]
-    pub struct Pointers {
-        pub disp: *mut f64,
-        pub sq_disp: *mut f64,
-        pub dev_disp: *mut f64,
-        pub dev_sq_disp: *mut f64,
-        pub stream: *mut c_void,
-    }
-
-    // SAFETY:
-    //  1. スレッド非依存: Pointersはスレッドローカルストレージではなく、OS/CUDAによって割り当てられたグローバルな領域であるため、
-    //                 別スレッドへ移動しても有効
-    //  2. 排他性: 各タスクにはGpuResources内の重複しない一意のインデックスを指すポインタが割り当てられるため、
-    //            別々のスレッドにSendされて各々が独立して書き込みを行っても、エイリアシングによる未定義動作は発生しない
-    //  3. 寿命: 参照先のメモリは親となるGpuResourcesが破棄されるまで（すべてのGPUタスクが終わるまで）有効である
-    unsafe impl Send for Pointers {}
-
-    // CUDAドライバからの通知をOSスレッドで受け取るためのメッセージ
-    struct CallbackMessage {
-        sender_ptr: *mut c_void,
-        disp_sum: f64,
-        sq_disp_sum: f64,
-    }
-
-    // 生ポインタを含んでいるが専用スレッドに渡して使用するためSendを実装
-    // SAFETY: CallbackMessage はGPUからのコールバックで受け取る生ポインタを含むが、
-    //         これらのポインタは専用のOSスレッド内でのみ使用され、他のスレッドに送られることはないため Send を実装しても安全
-    unsafe impl Send for CallbackMessage {}
-
-    static CALLBACK_TX: OnceLock<mpsc::Sender<CallbackMessage>> = OnceLock::new();
-
-    fn get_callback_tx() -> mpsc::Sender<CallbackMessage> {
-        CALLBACK_TX
-            .get_or_init(|| {
-                let (tx, rx) = mpsc::channel::<CallbackMessage>();
-                // アプリの起動中ずっと動き続けてTokioのスレッドをWakeする専用のOSスレッドを立ち上げる
-                thread::spawn(move || {
-                    for msg in rx {
-                        // ここは通常のOSスレッドなので、TokioのWakerを起動させる処理の重さを気にせずsendできる
-                        let sender = unsafe {
-                            Box::from_raw(msg.sender_ptr as *mut oneshot::Sender<(f64, f64)>)
-                        };
-                        let _ = sender.send((msg.disp_sum, msg.sq_disp_sum));
-                    }
-                });
-                tx
-            })
-            .clone()
-    }
-
-    unsafe extern "C" fn gpu_done_callback(sender: *mut c_void, disp_sum: f64, sq_disp_sum: f64) {
-        // CUDAドライバ管轄のOSスレッドをブロックしないよう、専用スレッドへメッセージとして送る
-        let tx = get_callback_tx();
-        let _ = tx.send(CallbackMessage {
-            sender_ptr: sender,
-            disp_sum,
-            sq_disp_sum,
-        });
-    }
-
-    /// GPUを用いてアンサンブル平均を非同期で計算する関数
-    ///
-    /// この関数は呼び出されると直ちにGPUに計算を投げ、完了まで現在のTokioタスクをOSスレッドをブロックすることなく完全にスリープさせる
-    pub async fn statistics(device_id: u64, length: f64, force: f64, ptrs: Pointers) -> Statistics {
-        // 長さと外力からハッシュ値を生成して、GPU側の乱数生成器のシードとして利用する
+    pub async fn statistics(
+        device: Arc<CudaContext>,
+        module: Arc<CudaModule>,
+        length: f64,
+        force: f64,
+    ) -> Statistics {
         let mut hasher = DefaultHasher::new();
         length.to_bits().hash(&mut hasher);
         force.to_bits().hash(&mut hasher);
+        let seed = hasher.finish();
 
-        // 結果を受け取るための1回限りの通信チャネル(oneshot)を作成
-        let (tx, rx) = oneshot::channel::<(f64, f64)>();
+        let inv_length = 1.0 / length;
 
-        unsafe {
-            // CUDAの非同期関数を呼び出す
-            // GPUへのコマンド送信をスケジュールするだけで関数自体は即座にリターンされるので、ブロックされない
-            async_calculate_displacements_sum_on_gpu(
-                gpu_done_callback,
-                // Cのコールバックに持たせるためにSenderをヒープに置き、所有権を放棄して生ポインタに変換する
-                Box::into_raw(Box::new(tx)) as *mut c_void,
-                ptrs.disp,
-                ptrs.sq_disp,
-                ptrs.dev_disp,
-                ptrs.dev_sq_disp,
-                ptrs.stream,
-                device_id,
-                hasher.finish(),
-                length,
-                force,
-            );
-        }
+        let (disp_sum, sq_disp_sum) = spawn_blocking(move || {
+            let func = module.load_function("displacements_sum").unwrap();
+            let stream = device.default_stream();
 
-        // CUDAの計算が終わって gpu_done_callback が呼ばれるまで、Tokioタスクを非同期待機させる
-        // 万が一CUDA側で致命的なエラーが発生してコールバックが呼ばれない場合に備えて24時間でタイムアウトさせる
-        let (disp_sum, sq_disp_sum) = tokio::time::timeout(Duration::from_hours(24), rx)
-            .await
-            .expect("GPUタスクがタイムアウトしました。CUDAでエラー・デッドロックが発生した可能性があります")
-            .expect("GPUでの計算完了のコールバックの受信に失敗");
+            let mut dev_disp = stream.alloc_zeros::<f64>(1).unwrap();
+            let mut dev_sq_disp = stream.alloc_zeros::<f64>(1).unwrap();
+
+            let block_size = 256;
+            let grid_size = ENSEMBLE_SIZE.div_ceil(block_size as u64) as u32;
+            let cfg = LaunchConfig {
+                grid_dim: (grid_size, 1, 1),
+                block_dim: (block_size as u32, 1, 1),
+                shared_mem_bytes: 0,
+            };
+
+            unsafe {
+                stream
+                    .launch_builder(&func)
+                    .arg(&seed)
+                    .arg(&length)
+                    .arg(&inv_length)
+                    .arg(&force)
+                    .arg(&mut dev_disp)
+                    .arg(&mut dev_sq_disp)
+                    .launch(cfg)
+            }
+            .unwrap();
+
+            let host_disp = stream.clone_dtoh(&dev_disp).unwrap();
+            let host_sq_disp = stream.clone_dtoh(&dev_sq_disp).unwrap();
+            (host_disp[0], host_sq_disp[0])
+        })
+        .await
+        .unwrap();
 
         let mean_displacement = disp_sum / ENSEMBLE_SIZE as f64;
         let mean_square_displacement = sq_disp_sum / ENSEMBLE_SIZE as f64;
@@ -272,7 +83,6 @@ mod backend {
     use rand::{SeedableRng, rngs::SmallRng};
     use rayon::prelude::*;
 
-    /// アンサンブル平均を用いて、非線形移動度、整流尺度、有効拡散係数を計算する
     pub fn statistics(length: f64, force: f64) -> Statistics {
         let force_vec = Vector2::new(force, 0.0);
         let (mean_displacement, mean_square_displacement) = (0..ENSEMBLE_SIZE)
@@ -281,9 +91,9 @@ mod backend {
                 let rng = SmallRng::seed_from_u64(i);
                 let mut particle = Particle::new(rng, length, force_vec);
                 let start = particle.now().position.x;
-                let delta_x = particle.nth(STEPS).unwrap().position.x - start; // 移動距離
+                let delta_x = particle.nth(STEPS).unwrap().position.x - start;
 
-                (delta_x, delta_x * delta_x) // 変位, 二乗変位
+                (delta_x, delta_x * delta_x)
             })
             .reduce_with(|(a, aa), (x, xx)| (a + x, aa + xx))
             .map(|(sum, sq_sum)| (sum / ENSEMBLE_SIZE as f64, sq_sum / ENSEMBLE_SIZE as f64))
@@ -297,32 +107,20 @@ mod backend {
             nonlinear_mobility: nonlinear_mobility(mean_speed, force),
         }
     }
-
-    pub async fn statistics_async(_device_id: u64, length: f64, force: f64) -> Statistics {
-        // CPU fallback for async. Just spawn blocking.
-        tokio::task::spawn_blocking(move || statistics(length, force))
-            .await
-            .unwrap()
-    }
 }
 
-#[allow(dead_code)]
-pub fn particle_distribution() {
-    todo!("アンサンブル平均により、粒子の位置分布を推定する機能を実装する予定")
+/// 有効拡散係数 D_eff = (⟨x^2⟩ - ⟨x⟩^2) / (2t)
+fn diffusion(mean_disp: f64, mean_sq_disp: f64, time: f64) -> f64 {
+    (mean_sq_disp - mean_disp * mean_disp) / (2.0 * time)
 }
 
-/// 非線形移動度 μ(f) = ⟨v⟩/|f|
+/// 非線形移動度 μ = ⟨v⟩ / F
 fn nonlinear_mobility(mean_speed: f64, force: f64) -> f64 {
     mean_speed / force
 }
 
-/// 有効拡散係数 D_eff = (⟨x²⟩ - ⟨x⟩²)/2t
-fn diffusion(mean_displacement: f64, mean_square_displacement: f64, time: f64) -> f64 {
-    (mean_square_displacement - mean_displacement * mean_displacement) / (2.0 * time)
-}
-
-/// 整流尺度 α = |μ(f) - μ(-f)| / (μ(f) + μ(-f))å
+/// 整流尺度 α = |μ - μ_rev| / (μ + μ_rev)
 #[allow(dead_code)]
-pub fn alpha(mu_forward: f64, mu_backward: f64) -> f64 {
-    (mu_forward - mu_backward).abs() / (mu_forward + mu_backward)
+pub fn alpha(forward_mobility: f64, backward_mobility: f64) -> f64 {
+    (forward_mobility - backward_mobility).abs() / (forward_mobility + backward_mobility)
 }

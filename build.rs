@@ -46,13 +46,21 @@ fn main() {
     {
         println!("cargo:rerun-if-changed=src/simulation.cu");
 
-        cc::Build::new()
-            .cuda(true)
-            .flag("-arch=sm_80")
-            .include(&out_dir)
-            .file("src/simulation.cu")
-            .compile("simulation");
+        let status = std::process::Command::new("nvcc")
+            .arg("-cubin")
+            .arg("-arch=sm_80")
+            .arg("-O3")
+            .arg("-I")
+            .arg(&out_dir)
+            .arg("src/simulation.cu")
+            .arg("-o")
+            .arg(Path::new(&out_dir).join("simulation.cubin"))
+            .status()
+            .expect("Failed to run nvcc to build CUBIN");
 
-        println!("cargo:rustc-link-lib=curand");
+        assert!(
+            status.success(),
+            "nvcc failed to compile simulation.cu to CUBIN"
+        );
     }
 }
