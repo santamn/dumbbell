@@ -281,6 +281,22 @@ extern "C"
     cudaFreeHost(ptr);
   }
 
+  // Rust側からDevice Memoryを確保するための関数
+  double *alloc_device_f64_memories(size_t n, uint64_t device_id)
+  {
+    cudaSetDevice(device_id);
+    double *ptr;
+    cudaMalloc(&ptr, n * sizeof(double));
+    return ptr;
+  }
+
+  // Rust側からDevice Memoryを解放するための関数
+  void free_device_f64_memories(double *ptr, uint64_t device_id)
+  {
+    cudaSetDevice(device_id);
+    cudaFree(ptr);
+  }
+
   // GPUの全ての作業が終わるまでCPUをブロックして待機する関数
   void synchronize_gpu_device(uint64_t device_id)
   {
@@ -294,6 +310,8 @@ extern "C"
       void *sender,                                  // 計算結果を送るためのチャネル （oneshot::Senderのポインタ）
       double *host_disp_ptr,                         // 確保済みのPinned Memory
       double *host_sq_disp_ptr,                      // 同上
+      double *dev_disp_ptr,                          // 確保済みのDevice Memory
+      double *dev_sq_disp_ptr,                       // 同上
       uint64_t device_id,                            // 使用するGPUのID
       uint64_t seed,                                 // 乱数のシード
       double length,                                 // 棒の長さ
@@ -306,27 +324,18 @@ extern "C"
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    // GPU側のメモリを確保
-    double *dev_disp;
-    double *dev_sq_disp;
-    // 重い cudaMalloc ではなく、ストリームのスケジュールに乗る Async 版を使用
-    cudaMallocAsync(&dev_disp, sizeof(double), stream);
-    cudaMallocAsync(&dev_sq_disp, sizeof(double), stream);
-    cudaMemsetAsync(dev_disp, 0, sizeof(double), stream);
-    cudaMemsetAsync(dev_sq_disp, 0, sizeof(double), stream);
+    // デバイスメモリの初期化
+    cudaMemsetAsync(dev_disp_ptr, 0, sizeof(double), stream);
+    cudaMemsetAsync(dev_sq_disp_ptr, 0, sizeof(double), stream);
 
     // ストリームを指定してカーネルを非同期に起動（CPUはここでブロックされず次へ進む）
     int blocks = (ENSEMBLE_SIZE + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    displacements_sum<<<blocks, THREADS_PER_BLOCK, 0, stream>>>(seed, length, 1.0 / length, force_x, dev_disp, dev_sq_disp);
+    displacements_sum<<<blocks, THREADS_PER_BLOCK, 0, stream>>>(seed, length, 1.0 / length, force_x, dev_disp_ptr, dev_sq_disp_ptr);
     // inv_lengthを事前に計算して渡すことで、カーネル内での無駄な逆数計算を省略
 
     // デバイスからホストへ、計算結果を非同期ストリーム上でコピーする
-    cudaMemcpyAsync(host_disp_ptr, dev_disp, sizeof(double), cudaMemcpyDeviceToHost, stream);
-    cudaMemcpyAsync(host_sq_disp_ptr, dev_sq_disp, sizeof(double), cudaMemcpyDeviceToHost, stream);
-
-    // コピーの予約が終わったので、このストリーム上でのデバイスメモリ解放も予約する
-    cudaFreeAsync(dev_disp, stream);
-    cudaFreeAsync(dev_sq_disp, stream);
+    cudaMemcpyAsync(host_disp_ptr, dev_disp_ptr, sizeof(double), cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(host_sq_disp_ptr, dev_sq_disp_ptr, sizeof(double), cudaMemcpyDeviceToHost, stream);
 
     // コールバックに必要な情報を一まとめにする
     AsyncContext *cb_data = new AsyncContext{

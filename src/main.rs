@@ -3,7 +3,7 @@ use nalgebra::Vector2;
 use rand::{SeedableRng, rngs::SmallRng};
 use renderer::SimApp;
 use simulation::{DELTA_T, K, Particle, STEPS};
-use statistics::{BulkPinnedBuffer, alpha, statistics};
+use statistics::{BulkBuffer, alpha, statistics};
 use std::fs::File;
 use std::io::Write;
 use std::ops::Range;
@@ -68,7 +68,7 @@ async fn calculate_statistics(lengths: &[f64]) {
 #[allow(dead_code)]
 async fn record_statistics(device_id: u64, length: f64, pb: ProgressBar) {
     let path = Path::new("data")
-        .join(format!("K_{}", K))
+        .join(format!("new_K_{}", K))
         .join(format!("len_{:.2}", length));
     std::fs::create_dir_all(&path).expect("ディレクトリの作成に失敗");
 
@@ -84,7 +84,7 @@ async fn record_statistics(device_id: u64, length: f64, pb: ProgressBar) {
 
     // 外力1~100をそれぞれ順方向と逆方向の両方に印加するシミュレーションを非同期で計算するタスクを作成
     // 100個の力に対して順方向と逆方向の両方を計算するので、200個分のバッファが必要
-    let bulk_buffer = BulkPinnedBuffer::new(device_id, 200);
+    let bulk_buffer = BulkBuffer::new(device_id, 200);
     let mut set: JoinSet<_> = (1..=100)
         .map(|i| {
             // closureの外でポインタを取得しておくことで、bulk_bufferそのものがasync blockにmoveされるのを防ぐ

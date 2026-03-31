@@ -4,7 +4,7 @@ pub struct Statistics {
     pub nonlinear_mobility: f64,
 }
 
-pub use backend::{BulkPinnedBuffer, statistics};
+pub use backend::{BulkBuffer, statistics};
 
 #[cfg(feature = "gpu")]
 mod backend {
@@ -24,6 +24,12 @@ mod backend {
         /// Pinned Memoryを解放するための関数
         unsafe fn free_pinned_f64_memories(ptr: *mut f64);
 
+        /// Device Memoryを確保するための関数
+        unsafe fn alloc_device_f64_memories(n: usize, device_id: u64) -> *mut f64;
+
+        /// Device Memoryを解放するための関数
+        unsafe fn free_device_f64_memories(ptr: *mut f64, device_id: u64);
+
         /// GPUの全ての作業が終わるまでCPUをブロックして待機する関数
         unsafe fn synchronize_gpu_device(device_id: u64);
 
@@ -33,6 +39,8 @@ mod backend {
             sender: *mut c_void, // 計算結果を送るためのチャネル （oneshot::Senderのポインタ）
             host_disp_ptr: *mut f64, // 確保済みのPinned Memory
             host_sq_disp_ptr: *mut f64, // 同上
+            dev_disp_ptr: *mut f64, // 事前確保済みのデバイスメモリ
+            dev_sq_disp_ptr: *mut f64, // 同上
             device_id: u64,
             seed: u64,
             length: f64,
@@ -40,26 +48,29 @@ mod backend {
         );
     }
 
-    /// GPUと非同期通信するための一括確保されたPinned Memory（ページロックメモリ）を管理する構造体
-    pub struct BulkPinnedBuffer {
+    /// GPUと非同期通信するための一括確保されたページロックメモリとデバイスメモリを管理する構造体
+    pub struct BulkBuffer {
         device_id: u64,
         disp_array: *mut f64,
         sq_disp_array: *mut f64,
+        dev_disp_array: *mut f64,
+        dev_sq_disp_array: *mut f64,
         capacity: usize,
     }
 
-    // SAFETY: BulkPinnedBuffer は実質的にヒープ上に確保された CUDA ページロックメモリを所有する独自のラッパーであり、
-    //         Drop時に適切に解放されるため、Box と同様に Send と Sync の対象となる
-    unsafe impl Send for BulkPinnedBuffer {}
-    unsafe impl Sync for BulkPinnedBuffer {}
+    // SAFETY: BulkBuffer はCUDAページロックメモリとデバイスメモリを管理するラッパーであり、
+    //         Drop時に適切に解放されるため、Box と同様に Send の対象となる
+    unsafe impl Send for BulkBuffer {}
 
-    impl BulkPinnedBuffer {
+    impl BulkBuffer {
         pub fn new(device_id: u64, total_tasks: usize) -> Self {
             unsafe {
                 Self {
                     device_id,
                     disp_array: alloc_pinned_f64_memories(total_tasks),
                     sq_disp_array: alloc_pinned_f64_memories(total_tasks),
+                    dev_disp_array: alloc_device_f64_memories(total_tasks, device_id),
+                    dev_sq_disp_array: alloc_device_f64_memories(total_tasks, device_id),
                     capacity: total_tasks,
                 }
             }
@@ -74,17 +85,21 @@ mod backend {
                     // .add(index) は自動的に sizeof(f64)*index 分だけアドレスを加算する
                     disp: self.disp_array.add(index),
                     sq_disp: self.sq_disp_array.add(index),
+                    dev_disp: self.dev_disp_array.add(index),
+                    dev_sq_disp: self.dev_sq_disp_array.add(index),
                 }
             }
         }
     }
 
-    impl Drop for BulkPinnedBuffer {
+    impl Drop for BulkBuffer {
         fn drop(&mut self) {
             let device_id = self.device_id;
             // 生ポインタはSendを実装していないため、usizeにキャストしてクロージャに渡す
             let disp_addr = self.disp_array as usize;
             let sq_disp_addr = self.sq_disp_array as usize;
+            let dev_disp_addr = self.dev_disp_array as usize;
+            let dev_sq_disp_addr = self.dev_sq_disp_array as usize;
 
             // メモリを解放する前に、GPUがこのメモリへの非同期書き込みをすべて完了するまで待つ必要があるが、
             // 非同期ランタイムのワーカースレッドをブロックしないために spawn_blocking に逃がす
@@ -92,21 +107,28 @@ mod backend {
                 synchronize_gpu_device(device_id);
                 free_pinned_f64_memories(disp_addr as *mut f64);
                 free_pinned_f64_memories(sq_disp_addr as *mut f64);
+                free_device_f64_memories(dev_disp_addr as *mut f64, device_id);
+                free_device_f64_memories(dev_sq_disp_addr as *mut f64, device_id);
             });
         }
     }
 
-    /// 各シミュレーションに渡すためのポインタのペア
+    /// 各シミュレーションに渡すためのポインタのセット
     #[derive(Clone, Copy)]
     pub struct Pointers {
         pub disp: *mut f64,
         pub sq_disp: *mut f64,
+        pub dev_disp: *mut f64,
+        pub dev_sq_disp: *mut f64,
     }
 
-    // SAFETY: Pointers は BulkPinnedBuffer 内の互いに重複しない独立したインデックスの生ポインタペアであり、
-    //         各々のタスク（スレッド）で別々に扱われ GPU に送信するため、Send と Sync を実装しても安全
+    // SAFETY:
+    //  1. スレッド非依存: Pointers はスレッドローカルストレージではなく、OS/CUDAによって割り当てられたグローバルな領域であるため、
+    //                 別スレッドへ移動しても有効
+    //  2. 排他性: 各タスクにはBulkBuffer内の重複しない一意のインデックスを指すポインタが割り当てられるため、
+    //            別々のスレッドにSendされて各々が独立して書き込みを行っても、エイリアシングによる未定義動作は発生しない
+    //  3. 寿命: 参照先のメモリは親となるBulkBufferが破棄されるまで（すべてのGPUタスクが終わるまで）有効である
     unsafe impl Send for Pointers {}
-    unsafe impl Sync for Pointers {}
 
     // CUDAドライバからの通知をOSスレッドで受け取るためのメッセージ
     struct CallbackMessage {
@@ -172,6 +194,8 @@ mod backend {
                 Box::into_raw(Box::new(tx)) as *mut c_void,
                 ptrs.disp,
                 ptrs.sq_disp,
+                ptrs.dev_disp,
+                ptrs.dev_sq_disp,
                 device_id,
                 hasher.finish(),
                 length,
