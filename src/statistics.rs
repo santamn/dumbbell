@@ -12,6 +12,9 @@ mod backend {
     use crate::simulation::{ENSEMBLE_SIZE, TIME};
     use std::ffi::c_void;
     use std::hash::{DefaultHasher, Hash, Hasher};
+    use std::sync::OnceLock;
+    use std::sync::mpsc;
+    use std::thread;
     use tokio::sync::oneshot;
 
     unsafe extern "C" {
@@ -46,7 +49,7 @@ mod backend {
     }
 
     // SAFETY: BulkPinnedBuffer は実質的にヒープ上に確保された CUDA ページロックメモリを所有する独自のラッパーであり、
-    //         Drop時に適切に解放されるため、Box と同様に Send と Sync の対象となる。
+    //         Drop時に適切に解放されるため、Box と同様に Send と Sync の対象となる
     unsafe impl Send for BulkPinnedBuffer {}
     unsafe impl Sync for BulkPinnedBuffer {}
 
@@ -101,15 +104,51 @@ mod backend {
     }
 
     // SAFETY: Pointers は BulkPinnedBuffer 内の互いに重複しない独立したインデックスの生ポインタペアであり、
-    //         各々のタスク（スレッド）で別々に扱われ GPU に送信するため、Send と Sync を実装しても安全である。
+    //         各々のタスク（スレッド）で別々に扱われ GPU に送信するため、Send と Sync を実装しても安全
     unsafe impl Send for Pointers {}
     unsafe impl Sync for Pointers {}
 
+    // CUDAドライバからの通知をOSスレッドで受け取るためのメッセージ
+    struct CallbackMessage {
+        sender_ptr: *mut c_void,
+        disp_sum: f64,
+        sq_disp_sum: f64,
+    }
+
+    // 生ポインタを含んでいるが専用スレッドに渡して使用するためSendを実装
+    // SAFETY: CallbackMessage はGPUからのコールバックで受け取る生ポインタを含むが、
+    //         これらのポインタは専用のOSスレッド内でのみ使用され、他のスレッドに送られることはないため Send を実装しても安全
+    unsafe impl Send for CallbackMessage {}
+
+    static CALLBACK_TX: OnceLock<mpsc::Sender<CallbackMessage>> = OnceLock::new();
+
+    fn get_callback_tx() -> mpsc::Sender<CallbackMessage> {
+        CALLBACK_TX
+            .get_or_init(|| {
+                let (tx, rx) = mpsc::channel::<CallbackMessage>();
+                // アプリの起動中ずっと動き続けてTokioのスレッドをWakeする専用のOSスレッドを立ち上げる
+                thread::spawn(move || {
+                    for msg in rx {
+                        // ここは通常のOSスレッドなので、TokioのWakerを起動させる処理の重さを気にせずsendできる
+                        let sender = unsafe {
+                            Box::from_raw(msg.sender_ptr as *mut oneshot::Sender<(f64, f64)>)
+                        };
+                        let _ = sender.send((msg.disp_sum, msg.sq_disp_sum));
+                    }
+                });
+                tx
+            })
+            .clone()
+    }
+
     unsafe extern "C" fn gpu_done_callback(sender: *mut c_void, disp_sum: f64, sq_disp_sum: f64) {
-        // user_data として渡された生ポインタから Box<Sender> を復元し、リソースの所有権を取り戻す
-        let sender = unsafe { Box::from_raw(sender as *mut oneshot::Sender<(f64, f64)>) };
-        // async 側の rx.await で待機しているタスクへ計算結果を送信して起床させる
-        let _ = sender.send((disp_sum, sq_disp_sum));
+        // CUDAドライバ管轄のOSスレッドをブロックしないよう、専用スレッドへメッセージとして送る
+        let tx = get_callback_tx();
+        let _ = tx.send(CallbackMessage {
+            sender_ptr: sender,
+            disp_sum,
+            sq_disp_sum,
+        });
     }
 
     /// GPUを用いてアンサンブル平均を非同期で計算する関数
