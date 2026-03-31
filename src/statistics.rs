@@ -49,6 +49,7 @@ mod backend {
         device_id: u64,
         disp_array: *mut f64,
         sq_disp_array: *mut f64,
+        capacity: usize,
     }
 
     // SAFETY: BulkPinnedBuffer は実質的にヒープ上に確保された CUDA ページロックメモリを所有する独自のラッパーであり、
@@ -63,12 +64,15 @@ mod backend {
                     device_id,
                     disp_array: alloc_pinned_f64_memories(total_tasks),
                     sq_disp_array: alloc_pinned_f64_memories(total_tasks),
+                    capacity: total_tasks,
                 }
             }
         }
 
         /// 指定したインデックスの書き込み先ポインタを取得する
         pub fn get_pointers(&self, index: usize) -> Pointers {
+            assert!(index < self.capacity); // 安全のため、インデックスが容量内に収まっていることを確認する
+
             unsafe {
                 Pointers {
                     // .add(index) は自動的に sizeof(f64) 分だけアドレスを計算する
