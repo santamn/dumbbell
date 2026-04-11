@@ -10,6 +10,7 @@ fn main() {
     let steps: usize = (time / delta_t) as usize; // シミュレーションステップ数
     let noise_scale: f64 = delta_t.sqrt(); // ノイズのスケール
     let ensemble_size: u64 = 30_000; // アンサンブルサイズ
+    let block_size: u32 = 256; // CUDAのブロックあたりのスレッド数
 
     let out_dir = env::var_os("OUT_DIR").unwrap();
 
@@ -21,6 +22,7 @@ fn main() {
     writeln!(constants_h, "#define STEPS {}", steps).unwrap();
     writeln!(constants_h, "#define NOISE_SCALE {:.15e}", noise_scale).unwrap();
     writeln!(constants_h, "#define ENSEMBLE_SIZE {}", ensemble_size).unwrap();
+    writeln!(constants_h, "#define THREADS_PER_BLOCK {}", block_size).unwrap();
 
     let mut constants_rs = File::create(Path::new(&out_dir).join("constants.rs")).unwrap();
     writeln!(constants_rs, "pub const DELTA_T: f64 = {:.15e};", delta_t).unwrap();
@@ -35,10 +37,11 @@ fn main() {
     .unwrap();
     writeln!(
         constants_rs,
-        "pub const ENSEMBLE_SIZE: u64 = {};",
+        "pub const ENSEMBLE_SIZE: u32 = {};",
         ensemble_size
     )
     .unwrap();
+    writeln!(constants_rs, "pub const BLOCK_SIZE: u32 = {};", block_size).unwrap();
 
     println!("cargo:rerun-if-changed=build.rs");
 

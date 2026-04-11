@@ -7,7 +7,6 @@
 
 #include "constants.h"
 
-constexpr int THREADS_PER_BLOCK = 256;
 constexpr int WARP_SIZE = 32;
 constexpr int WARPS_PER_BLOCK = THREADS_PER_BLOCK / WARP_SIZE;
 constexpr double TAU = 2.0 * M_PI;

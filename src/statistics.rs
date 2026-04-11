@@ -6,71 +6,117 @@ pub struct Statistics {
 
 #[allow(unused_imports)]
 pub use backend::statistics;
-#[cfg(feature = "gpu")]
-pub use backend::sweep_statistics;
 
 #[cfg(feature = "gpu")]
 mod backend {
     use super::{Statistics, diffusion, nonlinear_mobility};
-    use crate::simulation::{ENSEMBLE_SIZE, TIME};
+    use crate::simulation::{BLOCK_SIZE, ENSEMBLE_SIZE, TIME};
     use cudarc::driver::{CudaContext, CudaModule, LaunchConfig, PushKernelArg};
     use std::hash::{DefaultHasher, Hash, Hasher};
+    use std::ops::RangeInclusive;
     use std::sync::Arc;
     use tokio::sync::mpsc::Receiver;
-    use tokio::task::spawn_blocking;
 
-    /// 単一の外力に対してGPUを用いてアンサンブル平均を計算する関数
-    #[allow(dead_code)]
+    /// GPUを用いて指定された範囲の外力のシミュレーション結果を一括で非同期計算し、結果をストリーム（Receiver）として順番に返す関数
     pub async fn statistics(
-        device: Arc<CudaContext>,
+        ctx: Arc<CudaContext>,
+        module: Arc<CudaModule>,
+        length: f64,
+        forces: RangeInclusive<usize>,
+    ) -> Receiver<(f64, Statistics, Statistics)> {
+        // 結果を受け取るためのチャネルを作成
+        let (tx, rx) = tokio::sync::mpsc::channel(forces.end() - forces.start() + 1);
+        // Tokioの軽量タスク（JoinSetを用いた並行Spawn）としてスケジューリング
+        let mut join_set = tokio::task::JoinSet::new();
+
+        // 各外力に対してシミュレーションをSpawn
+        forces
+            .into_iter()
+            .map(|i| {
+                (
+                    tx.clone(),
+                    i as f64,
+                    (ctx.clone(), module.clone()),
+                    (ctx.clone(), module.clone()),
+                )
+            })
+            .for_each(|(tx, force, (f_ctx, f_mod), (b_ctx, b_mod))| {
+                // 外力ごとに個別の短命なTokioタスクを生やし、順方向と逆方向のシミュレーションを同時に待機
+                join_set.spawn(async move {
+                    let (forward_stat, backward_stat) = tokio::join!(
+                        simulate_single_case(f_ctx, f_mod, length, force),
+                        simulate_single_case(b_ctx, b_mod, length, -force)
+                    );
+                    // 計算が終了したものからチャネルに結果を流し込むため、呼び出し元でも即座にファイル書き込み等の逐次処理が可能
+                    let _ = tx.send((force, forward_stat, backward_stat)).await;
+                });
+            });
+
+        // 全てのタスクが完了するまでJoinSetを待機（リソースリークを防ぐため、裏で全ての完了を保証）
+        tokio::spawn(async move { while join_set.join_next().await.is_some() {} });
+
+        rx
+    }
+
+    /// 単一のシミュレーションに対するCUDAシミュレーションと非同期メモリ転送を司る関数
+    async fn simulate_single_case(
+        ctx: Arc<CudaContext>,
         module: Arc<CudaModule>,
         length: f64,
         force: f64,
     ) -> Statistics {
+        // パラメーターをハッシュ化してシード値を生成
         let mut hasher = DefaultHasher::new();
         length.to_bits().hash(&mut hasher);
         force.to_bits().hash(&mut hasher);
         let seed = hasher.finish();
 
-        let inv_length = 1.0 / length;
+        // 専用のストリーム（非同期実行キュー）を作成
+        let stream = ctx.new_stream().unwrap();
+        // GPU上のデバイスメモリを確保
+        let mut dev_disp = stream.alloc_zeros::<f64>(1).unwrap();
+        let mut dev_sq_disp = stream.alloc_zeros::<f64>(1).unwrap();
+        // ホスト側のピン留めメモリ（ページロック対象）を割り当て
+        // コピー先の領域として使用するため、初期化なしでallocして良い
+        let mut host_disp = unsafe { ctx.alloc_pinned::<f64>(1).unwrap() };
+        let mut host_sq_disp = unsafe { ctx.alloc_pinned::<f64>(1).unwrap() };
 
-        let (disp_sum, sq_disp_sum) = spawn_blocking(move || {
-            let func = module.load_function("displacements_sum").unwrap();
-            let stream = device.default_stream();
-
-            let mut dev_disp = stream.alloc_zeros::<f64>(1).unwrap();
-            let mut dev_sq_disp = stream.alloc_zeros::<f64>(1).unwrap();
-
-            let block_size = 256;
-            let grid_size = ENSEMBLE_SIZE.div_ceil(block_size as u64) as u32;
-            let cfg = LaunchConfig {
-                grid_dim: (grid_size, 1, 1),
-                block_dim: (block_size as u32, 1, 1),
-                shared_mem_bytes: 0,
-            };
-
-            unsafe {
-                stream
-                    .launch_builder(&func)
-                    .arg(&seed)
-                    .arg(&length)
-                    .arg(&inv_length)
-                    .arg(&force)
-                    .arg(&mut dev_disp)
-                    .arg(&mut dev_sq_disp)
-                    .launch(cfg)
-            }
-            .unwrap();
-
-            let host_disp = stream.clone_dtoh(&dev_disp).unwrap();
-            let host_sq_disp = stream.clone_dtoh(&dev_sq_disp).unwrap();
-            (host_disp[0], host_sq_disp[0])
-        })
-        .await
+        // カーネルの非同期実行をストリームへ投入
+        let func = module.load_function("displacements_sum").unwrap();
+        unsafe {
+            stream
+                .launch_builder(&func)
+                .arg(&seed)
+                .arg(&length)
+                .arg(&(1.0 / length)) // 逆数を事前に計算して渡すことで、カーネル内での除算を乗算に変換し高速化
+                .arg(&force)
+                .arg(&mut dev_disp)
+                .arg(&mut dev_sq_disp)
+                .launch(LaunchConfig {
+                    block_dim: (BLOCK_SIZE, 1, 1),
+                    grid_dim: (ENSEMBLE_SIZE.div_ceil(BLOCK_SIZE), 1, 1),
+                    shared_mem_bytes: 0,
+                })
+        }
         .unwrap();
 
-        let mean_displacement = disp_sum / ENSEMBLE_SIZE as f64;
-        let mean_square_displacement = sq_disp_sum / ENSEMBLE_SIZE as f64;
+        // デバイスからピン留めメモリへの非同期転送をストリームへ予約
+        stream.memcpy_dtoh(&dev_disp, &mut host_disp).unwrap();
+        stream.memcpy_dtoh(&dev_sq_disp, &mut host_sq_disp).unwrap();
+
+        // ストリーム上のすべての処理（カーネル実行と非同期転送）の完了マーカーとしてイベントを記録
+        let event = stream.record_event(None).unwrap();
+        // イベントが完了するまで TokioランタイムにCPUの実行権を譲りながら待機
+        while !event.is_complete() {
+            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+        }
+
+        // イベントの発火後なので、as_slice()による同期呼び出しは即座に完了しブロックは発生しない
+        let h_disp = host_disp.as_slice().unwrap()[0];
+        let h_sq_disp = host_sq_disp.as_slice().unwrap()[0];
+
+        let mean_displacement = h_disp / ENSEMBLE_SIZE as f64;
+        let mean_square_displacement = h_sq_disp / ENSEMBLE_SIZE as f64;
         let mean_speed = mean_displacement / TIME;
 
         Statistics {
@@ -78,156 +124,6 @@ mod backend {
             first_passage_time: 1.0 / mean_speed.abs(),
             nonlinear_mobility: nonlinear_mobility(mean_speed, force),
         }
-    }
-
-    /// GPUを用いて指定された範囲の外力（1からmax_forceまで順逆両方）のシミュレーション結果を一括で非同期計算し、
-    /// 結果をストリーム（Receiver）として順番に返す関数。元の BulkBuffer に相当する高速化・スレッドブロック局所化を行います。
-    pub async fn sweep_statistics(
-        device: Arc<CudaContext>,
-        module: Arc<CudaModule>,
-        length: f64,
-        max_force: usize,
-    ) -> Receiver<(usize, Statistics, Statistics)> {
-        // 結果を受け取るためのチャネルを作成
-        let (tx, rx) = tokio::sync::mpsc::channel(max_force.max(1));
-
-        // メモリの確保とGPUへのカーネル投入、同期待機処理はTokioのワーカースレッドをブロックしないよう `spawn_blocking` で行う
-        spawn_blocking(move || {
-            let func = module.load_function("displacements_sum").unwrap();
-            let inv_length = 1.0 / length;
-
-            // 前方と後方のシミュレーション管理のための構造
-            struct TaskData {
-                stream: Arc<cudarc::driver::CudaStream>,
-                dev_disp: cudarc::driver::CudaSlice<f64>,
-                dev_sq_disp: cudarc::driver::CudaSlice<f64>,
-                force: f64,
-                seed: u64,
-            }
-
-            let block_size = 256;
-            let grid_size = ENSEMBLE_SIZE.div_ceil(block_size as u64) as u32;
-            let cfg = LaunchConfig {
-                grid_dim: (grid_size, 1, 1),
-                block_dim: (block_size as u32, 1, 1),
-                shared_mem_bytes: 0,
-            };
-
-            // 個別のCUDAストリームとデバイスメモリの一括事前確保
-            let mut forward_tasks = Vec::with_capacity(max_force);
-            let mut backward_tasks = Vec::with_capacity(max_force);
-
-            for i in 1..=max_force {
-                let f_force = i as f64;
-                let b_force = -(i as f64);
-
-                let mut hasher = DefaultHasher::new();
-                length.to_bits().hash(&mut hasher);
-                f_force.to_bits().hash(&mut hasher);
-                let f_seed = hasher.finish();
-
-                let mut hasher = DefaultHasher::new();
-                length.to_bits().hash(&mut hasher);
-                b_force.to_bits().hash(&mut hasher);
-                let b_seed = hasher.finish();
-
-                // 独立したストリームを作成し、非同期のストリームオーダー・メモリ確保を利用する (非常に軽量)
-                let f_stream = device.new_stream().unwrap();
-                let f_dev_disp = f_stream.alloc_zeros::<f64>(1).unwrap();
-                let f_dev_sq_disp = f_stream.alloc_zeros::<f64>(1).unwrap();
-
-                let b_stream = device.new_stream().unwrap();
-                let b_dev_disp = b_stream.alloc_zeros::<f64>(1).unwrap();
-                let b_dev_sq_disp = b_stream.alloc_zeros::<f64>(1).unwrap();
-
-                forward_tasks.push(TaskData {
-                    stream: f_stream,
-                    dev_disp: f_dev_disp,
-                    dev_sq_disp: f_dev_sq_disp,
-                    force: f_force,
-                    seed: f_seed,
-                });
-
-                backward_tasks.push(TaskData {
-                    stream: b_stream,
-                    dev_disp: b_dev_disp,
-                    dev_sq_disp: b_dev_sq_disp,
-                    force: b_force,
-                    seed: b_seed,
-                });
-            }
-
-            // GPUの各ストリームに一気にカーネルを非同期に投入する
-            // ここは関数が即座にリターンするためブロックされない
-            for (f_task, b_task) in forward_tasks.iter_mut().zip(backward_tasks.iter_mut()) {
-                unsafe {
-                    f_task
-                        .stream
-                        .launch_builder(&func)
-                        .arg(&f_task.seed)
-                        .arg(&length)
-                        .arg(&inv_length)
-                        .arg(&f_task.force)
-                        .arg(&mut f_task.dev_disp)
-                        .arg(&mut f_task.dev_sq_disp)
-                        .launch(cfg)
-                }
-                .unwrap();
-
-                unsafe {
-                    b_task
-                        .stream
-                        .launch_builder(&func)
-                        .arg(&b_task.seed)
-                        .arg(&length)
-                        .arg(&inv_length)
-                        .arg(&b_task.force)
-                        .arg(&mut b_task.dev_disp)
-                        .arg(&mut b_task.dev_sq_disp)
-                        .launch(cfg)
-                }
-                .unwrap();
-            }
-
-            // 全てのカーネルがスケジュールされた後、順次デバイスから結果をホスト（CPU）に転送し、チャネルを通じて通知する
-            // (Tokioスレッドではなく、この spawn_blocking されたOSスレッドだけが同期待機を行う)
-            for (idx, (f_task, b_task)) in
-                forward_tasks.iter().zip(backward_tasks.iter()).enumerate()
-            {
-                // clone_dtoh を呼ぶことで当該ストリームの完了を待機する
-                let f_disp = f_task.stream.clone_dtoh(&f_task.dev_disp).unwrap()[0];
-                let f_sq_disp = f_task.stream.clone_dtoh(&f_task.dev_sq_disp).unwrap()[0];
-
-                let b_disp = b_task.stream.clone_dtoh(&b_task.dev_disp).unwrap()[0];
-                let b_sq_disp = b_task.stream.clone_dtoh(&b_task.dev_sq_disp).unwrap()[0];
-
-                let f_mean_disp = f_disp / ENSEMBLE_SIZE as f64;
-                let f_mean_sq_disp = f_sq_disp / ENSEMBLE_SIZE as f64;
-                let f_mean_speed = f_mean_disp / TIME;
-
-                let b_mean_disp = b_disp / ENSEMBLE_SIZE as f64;
-                let b_mean_sq_disp = b_sq_disp / ENSEMBLE_SIZE as f64;
-                let b_mean_speed = b_mean_disp / TIME;
-
-                let forward_stat = Statistics {
-                    effective_diffusion: diffusion(f_mean_disp, f_mean_sq_disp, TIME),
-                    first_passage_time: 1.0 / f_mean_speed.abs(),
-                    nonlinear_mobility: nonlinear_mobility(f_mean_speed, f_task.force),
-                };
-
-                let backward_stat = Statistics {
-                    effective_diffusion: diffusion(b_mean_disp, b_mean_sq_disp, TIME),
-                    first_passage_time: 1.0 / b_mean_speed.abs(),
-                    nonlinear_mobility: nonlinear_mobility(b_mean_speed, b_task.force),
-                };
-
-                let i = idx + 1;
-                // Channelが閉じられても問題ないようにエラーは無視 (途中でキャンセルされた場合など)
-                let _ = tx.blocking_send((i, forward_stat, backward_stat));
-            }
-        });
-
-        rx
     }
 }
 
