@@ -11,17 +11,99 @@ pub use backend::statistics;
 mod backend {
     use super::{Statistics, diffusion, nonlinear_mobility};
     use crate::simulation::{BLOCK_SIZE, ENSEMBLE_SIZE, TIME};
-    use cudarc::driver::{CudaContext, CudaModule, LaunchConfig, PushKernelArg};
+    use cudarc::driver::{
+        CudaContext, CudaModule, CudaSlice, CudaStream, LaunchConfig, PushKernelArg,
+    };
     use std::hash::{DefaultHasher, Hash, Hasher};
     use std::ops::RangeInclusive;
-    use std::sync::Arc;
-    use std::sync::OnceLock;
-    use tokio::sync::Mutex;
-    use tokio::sync::mpsc::Receiver;
+    use std::sync::{Arc, OnceLock};
+    use tokio::sync::{Mutex, mpsc::Receiver, mpsc::Sender};
 
     static CU_ALLOC_MUX: OnceLock<Mutex<()>> = OnceLock::new();
 
-    /// GPUを用いて指定された範囲の外力のシミュレーション結果を一括で非同期計算し、結果をストリーム（Receiver）として順番に返す関数
+    /// GPUデバイスからのストリームと各タスク用メモリ領域を使い回すための構造体
+    struct CudaWorker {
+        stream: Arc<CudaStream>,
+        dev_disp: CudaSlice<f64>,
+        dev_sq_disp: CudaSlice<f64>,
+    }
+
+    impl CudaWorker {
+        fn memset_zeros(&mut self) {
+            self.stream.memset_zeros(&mut self.dev_disp).unwrap();
+            self.stream.memset_zeros(&mut self.dev_sq_disp).unwrap();
+        }
+    }
+
+    /// GPUリソース（CudaWorker）をプールする構造体
+    #[derive(Clone)]
+    struct CudaWorkerPool {
+        sender: Sender<CudaWorker>,
+        receiver: Arc<Mutex<Receiver<CudaWorker>>>,
+    }
+
+    impl CudaWorkerPool {
+        async fn new(ctx: Arc<CudaContext>, count: usize) -> Self {
+            let (sender, receiver) = tokio::sync::mpsc::channel(count);
+            let receiver = Arc::new(Mutex::new(receiver));
+
+            // CU_ALLOC_MUXを用いて排他的に複数ワーカーを一括生成
+            // これによりハングアップを防ぎつつ、初期化オーバーヘッドを1回で済ませる
+            {
+                let _guard = CU_ALLOC_MUX.get_or_init(|| Mutex::new(())).lock().await;
+                for _ in 0..count {
+                    let stream = ctx.new_stream().unwrap();
+                    let dev_disp = stream.alloc_zeros::<f64>(1).unwrap();
+                    let dev_sq_disp = stream.alloc_zeros::<f64>(1).unwrap();
+                    sender
+                        .send(CudaWorker {
+                            stream,
+                            dev_disp,
+                            dev_sq_disp,
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+
+            Self { sender, receiver }
+        }
+
+        /// プールからワーカーを取得する非同期関数
+        async fn acquire(&self) -> CudaWorker {
+            let mut rx = self.receiver.lock().await;
+            rx.recv().await.expect("ワーカーの取得に失敗")
+        }
+
+        /// ワーカーをプールに返却する非同期関数
+        async fn release(&self, worker: CudaWorker) {
+            self.sender
+                .send(worker)
+                .await
+                .expect("ワーカーの返却に失敗");
+        }
+
+        // 全タスク完了後のGPUリソース一括解放
+        async fn destroy(self) {
+            let mut rx = self.receiver.lock().await;
+            rx.close(); // 受信側を明示的に閉じ、ワーカーを取り出せないようにする
+
+            let mut workers = Vec::new();
+            while let Some(worker) = rx.recv().await {
+                workers.push(worker); // キュー内の不要になった全てのワーカーを安全なメモリへ移す
+            }
+
+            // 安全な一括破棄（排他制御）
+            let _guard = CU_ALLOC_MUX.get().unwrap().lock().await;
+            tokio::task::spawn_blocking(move || {
+                drop(workers); // 完全にOSスレッド上で直列に行われるため、ドライバロック競合が起きずハングアップしなくなる
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    /// GPUを用いて指定された範囲の外力のシミュレーション結果を一括で非同期計算し、結果をストリームとして順番に返す関数
     pub async fn statistics(
         ctx: Arc<CudaContext>,
         module: Arc<CudaModule>,
@@ -30,6 +112,11 @@ mod backend {
     ) -> Receiver<(f64, Statistics, Statistics)> {
         // 結果を受け取るためのチャネルを作成
         let (tx, rx) = tokio::sync::mpsc::channel(forces.end() - forces.start() + 1);
+
+        // GPUリソースプール（CudaWorker）の作成
+        // キュー容量が実質的なSemaphore(並行制限)として機能する
+        let pool = CudaWorkerPool::new(ctx.clone(), 128).await;
+
         // Tokioの軽量タスク（JoinSetを用いた並行Spawn）としてスケジューリング
         let mut join_set = tokio::task::JoinSet::new();
 
@@ -40,34 +127,39 @@ mod backend {
                 (
                     tx.clone(),
                     i as f64,
-                    (ctx.clone(), module.clone()),
-                    (ctx.clone(), module.clone()),
+                    module.clone(),
+                    module.clone(),
+                    pool.clone(),
                 )
             })
-            .for_each(|(tx, force, (f_ctx, f_mod), (b_ctx, b_mod))| {
+            .for_each(|(tx, force, f_mod, b_mod, pool)| {
                 // 外力ごとに個別の短命なTokioタスクを生やし、順方向と逆方向のシミュレーションを同時に待機
                 join_set.spawn(async move {
                     let (forward_stat, backward_stat) = tokio::join!(
-                        simulate_single_case(f_ctx, f_mod, length, force),
-                        simulate_single_case(b_ctx, b_mod, length, -force)
+                        simulate_single_case(f_mod, length, force, pool.clone()),
+                        simulate_single_case(b_mod, length, -force, pool)
                     );
                     // 計算が終了したものからチャネルに結果を流し込むため、呼び出し元でも即座にファイル書き込み等の逐次処理が可能
                     let _ = tx.send((force, forward_stat, backward_stat)).await;
                 });
             });
 
-        // 全てのタスクが完了するまでJoinSetを待機（リソースリークを防ぐため、裏で全ての完了を保証）
-        tokio::spawn(async move { while join_set.join_next().await.is_some() {} });
+        tokio::spawn(async move {
+            // 全てのタスクが完了するまでJoinSetを待機（リソースリークを防ぐため、裏で全ての完了を保証）
+            while join_set.join_next().await.is_some() {}
+            // 全タスク完了後のGPUリソース一括解放
+            pool.destroy().await;
+        });
 
         rx
     }
 
     /// 単一のシミュレーションに対するCUDAシミュレーションと非同期メモリ転送を司る関数
     async fn simulate_single_case(
-        ctx: Arc<CudaContext>,
         module: Arc<CudaModule>,
         length: f64,
         force: f64,
+        pool: CudaWorkerPool,
     ) -> Statistics {
         // パラメーターをハッシュ化してシード値を生成
         let mut hasher = DefaultHasher::new();
@@ -75,27 +167,23 @@ mod backend {
         force.to_bits().hash(&mut hasher);
         let seed = hasher.finish();
 
-        // 同時に数百のタスクがCUDAの初期化処理に入って不安定になることを防ぐため、Mutexによってストリームやメモリ空間の作成を同期的に行う
-        let _guard = CU_ALLOC_MUX.get_or_init(|| Mutex::new(())).lock().await;
-        // 専用のストリーム（非同期実行キュー）を作成
-        let stream = ctx.new_stream().unwrap();
-        // GPU上のデバイスメモリを確保
-        let mut dev_disp = stream.alloc_zeros::<f64>(1).unwrap();
-        let mut dev_sq_disp = stream.alloc_zeros::<f64>(1).unwrap();
-        // メモリ確保が完了したらロックを解放して他のタスクがCUDA処理に入れるようにする
-        drop(_guard);
+        // プールから使用するワーカーを取得
+        let mut worker = pool.acquire().await;
+        // 次のカーネル実行のためデバイスメモリを 0 に初期化
+        worker.memset_zeros();
 
         // カーネルの非同期実行をストリームへ投入
         let func = module.load_function("displacements_sum").unwrap();
         unsafe {
-            stream
+            worker
+                .stream
                 .launch_builder(&func)
                 .arg(&seed)
                 .arg(&length)
                 .arg(&(1.0 / length)) // 逆数を事前に計算して渡すことで、カーネル内での除算を乗算に変換し高速化
                 .arg(&force)
-                .arg(&mut dev_disp)
-                .arg(&mut dev_sq_disp)
+                .arg(&mut worker.dev_disp)
+                .arg(&mut worker.dev_sq_disp)
                 .launch(LaunchConfig {
                     block_dim: (BLOCK_SIZE, 1, 1),
                     grid_dim: (ENSEMBLE_SIZE.div_ceil(BLOCK_SIZE), 1, 1),
@@ -106,13 +194,17 @@ mod backend {
 
         // わずか16バイトの転送であるため、spawn_blockingを用いてOSスレッド上で同期コピー（完了待機）を行う
         // これにより、イベントのポーリングによるReadLockの枯渇を防ぐ
-        let (h_disp, h_sq_disp) = tokio::task::spawn_blocking(move || {
-            let h_disp = stream.clone_dtoh(&dev_disp).unwrap();
-            let h_sq_disp = stream.clone_dtoh(&dev_sq_disp).unwrap();
-            (h_disp[0], h_sq_disp[0])
+        let (worker, h_disp, h_sq_disp) = tokio::task::spawn_blocking(move || {
+            let h_disp = worker.stream.clone_dtoh(&worker.dev_disp).unwrap();
+            let h_sq_disp = worker.stream.clone_dtoh(&worker.dev_sq_disp).unwrap();
+            // 結果と所有権をそのまま一緒に返すためキューは一切ロック処理が不要
+            (worker, h_disp[0], h_sq_disp[0])
         })
         .await
         .unwrap();
+
+        // 使用し終わったワーカーをプールに返却
+        pool.release(worker).await;
 
         let mean_displacement = h_disp / ENSEMBLE_SIZE as f64;
         let mean_square_displacement = h_sq_disp / ENSEMBLE_SIZE as f64;

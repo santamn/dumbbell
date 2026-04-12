@@ -21,7 +21,7 @@ mod simulation;
 mod statistics;
 
 // GPU 3の性能が最も良いので、GPU 3を優先的に使うようにGPUのIDを指定する
-const GPU_IDS: [u64; 3] = [3, 1, 2];
+const GPU_IDS: [usize; 3] = [3, 1, 2];
 
 fn main() {
     let lengths = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1];
@@ -43,14 +43,14 @@ async fn calculate_statistics(lengths: &[f64]) {
     // 大量のシミュレーションが一気にGPUに積まれてVRAM不足になるのを防ぐ
     let semaphores: Vec<Arc<Semaphore>> = GPU_IDS
         .iter()
-        .map(|_| Arc::new(Semaphore::new(4)))
+        .map(|_| Arc::new(Semaphore::new(1)))
         .collect();
 
     // 各GPUのコンテキストとモジュールを事前に作成しておき、シミュレーションタスクに渡すためのタプルを作成
     let devices: Vec<(Arc<CudaContext>, Arc<CudaModule>)> = GPU_IDS
         .iter()
         .map(|&id| {
-            let ctx = CudaContext::new(id as usize).unwrap();
+            let ctx = CudaContext::new(id).unwrap();
             let ptx = cudarc::nvrtc::Ptx::from_binary(
                 include_bytes!(concat!(env!("OUT_DIR"), "/simulation.cubin")).to_vec(),
             );
@@ -60,6 +60,7 @@ async fn calculate_statistics(lengths: &[f64]) {
         })
         .collect();
 
+    // プログレスバーのスタイルを定義
     let style = ProgressStyle::default_bar()
         .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) - {msg}")
         .unwrap()
@@ -79,7 +80,7 @@ async fn calculate_statistics(lengths: &[f64]) {
         tokio::spawn(async move {
             // このGPUに割り当てられた実行枠を取得するまで待機
             let _permit = semaphore.acquire().await.unwrap();
-            record_statistics(device, GPU_IDS[index], length, pb).await;
+            record_statistics(device, length, pb).await;
             // ブロックを抜けると _permit がドロップされ、次のシミュレーションがこのGPUで実行可能になる
         })
     }))
@@ -88,8 +89,7 @@ async fn calculate_statistics(lengths: &[f64]) {
 
 #[cfg(feature = "gpu")]
 async fn record_statistics(
-    device_info: (Arc<CudaContext>, Arc<CudaModule>),
-    device_id: u64,
+    device: (Arc<CudaContext>, Arc<CudaModule>),
     length: f64,
     pb: ProgressBar,
 ) {
@@ -108,7 +108,8 @@ async fn record_statistics(
     let mut time_dat = File::create(path.join("time.dat")).unwrap();
     let mut alpha_dat = File::create(path.join("alpha.dat")).unwrap();
 
-    let (ctx, module) = device_info;
+    let (ctx, module) = device;
+    let device_id = ctx.ordinal();
 
     // 全ての計算を並列に GPU に投げ、完了したものから受け取る流し込み処理
     let mut rx = statistics(ctx, module, length, 1..=100).await;

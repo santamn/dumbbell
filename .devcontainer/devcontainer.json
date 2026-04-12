@@ -48,8 +48,9 @@
     }
   },
   "runArgs": [
-    "--device=nvidia.com/gpu=3",
-    "--memory=60gb"
+    "--device=nvidia.com/gpu=1",
+    "--device=nvidia.com/gpu=2",
+    "--device=nvidia.com/gpu=3"
   ],
   "containerUser": "miyake",
   "postCreateCommand": "cargo fetch",
