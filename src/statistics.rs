@@ -115,7 +115,7 @@ mod backend {
 
         // GPUリソースプール（CudaWorker）の作成
         // キュー容量が実質的なSemaphore(並行制限)として機能する
-        let pool = CudaWorkerPool::new(ctx.clone(), 128).await;
+        let pool = CudaWorkerPool::new(ctx.clone(), 16).await;
 
         // Tokioの軽量タスク（JoinSetを用いた並行Spawn）としてスケジューリング
         let mut join_set = tokio::task::JoinSet::new();
