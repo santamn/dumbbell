@@ -24,7 +24,7 @@ mod statistics;
 const GPU_IDS: [u64; 3] = [3, 1, 2];
 
 fn main() {
-    let lengths = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.09, 0.08, 0.1];
+    let lengths = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1];
     // Tokio のランタイム（非同期実行エンジン）を明示的に立ち上げる
     let rt = tokio::runtime::Runtime::new().unwrap();
     // 立ち上げたエンジンの上で非同期のメイン処理を実行し、全て終わるまで同期的にブロックして待つ
@@ -109,7 +109,8 @@ async fn record_statistics(
     let mut alpha_dat = File::create(path.join("alpha.dat")).unwrap();
 
     let (ctx, module) = device_info;
-    // 全ての計算を非同期（1つのブロック内）で並列に GPU に投げ、完了したものから受け取る流し込み処理
+
+    // 全ての計算を並列に GPU に投げ、完了したものから受け取る流し込み処理
     let mut rx = statistics(ctx, module, length, 1..=100).await;
     while let Some((force, forward, backward)) = rx.recv().await {
         writeln!(

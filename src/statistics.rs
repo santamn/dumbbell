@@ -15,7 +15,11 @@ mod backend {
     use std::hash::{DefaultHasher, Hash, Hasher};
     use std::ops::RangeInclusive;
     use std::sync::Arc;
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex;
     use tokio::sync::mpsc::Receiver;
+
+    static CU_ALLOC_MUX: OnceLock<Mutex<()>> = OnceLock::new();
 
     /// GPUを用いて指定された範囲の外力のシミュレーション結果を一括で非同期計算し、結果をストリーム（Receiver）として順番に返す関数
     pub async fn statistics(
@@ -71,15 +75,15 @@ mod backend {
         force.to_bits().hash(&mut hasher);
         let seed = hasher.finish();
 
+        // 同時に数百のタスクがCUDAの初期化処理に入って不安定になることを防ぐため、Mutexによってストリームやメモリ空間の作成を同期的に行う
+        let _guard = CU_ALLOC_MUX.get_or_init(|| Mutex::new(())).lock().await;
         // 専用のストリーム（非同期実行キュー）を作成
         let stream = ctx.new_stream().unwrap();
         // GPU上のデバイスメモリを確保
         let mut dev_disp = stream.alloc_zeros::<f64>(1).unwrap();
         let mut dev_sq_disp = stream.alloc_zeros::<f64>(1).unwrap();
-        // ホスト側のピン留めメモリ（ページロック対象）を割り当て
-        // コピー先の領域として使用するため、初期化なしでallocして良い
-        let mut host_disp = unsafe { ctx.alloc_pinned::<f64>(1).unwrap() };
-        let mut host_sq_disp = unsafe { ctx.alloc_pinned::<f64>(1).unwrap() };
+        // メモリ確保が完了したらロックを解放して他のタスクがCUDA処理に入れるようにする
+        drop(_guard);
 
         // カーネルの非同期実行をストリームへ投入
         let func = module.load_function("displacements_sum").unwrap();
@@ -100,20 +104,15 @@ mod backend {
         }
         .unwrap();
 
-        // デバイスからピン留めメモリへの非同期転送をストリームへ予約
-        stream.memcpy_dtoh(&dev_disp, &mut host_disp).unwrap();
-        stream.memcpy_dtoh(&dev_sq_disp, &mut host_sq_disp).unwrap();
-
-        // ストリーム上のすべての処理（カーネル実行と非同期転送）の完了マーカーとしてイベントを記録
-        let event = stream.record_event(None).unwrap();
-        // イベントが完了するまで TokioランタイムにCPUの実行権を譲りながら待機
-        while !event.is_complete() {
-            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-        }
-
-        // イベントの発火後なので、as_slice()による同期呼び出しは即座に完了しブロックは発生しない
-        let h_disp = host_disp.as_slice().unwrap()[0];
-        let h_sq_disp = host_sq_disp.as_slice().unwrap()[0];
+        // わずか16バイトの転送であるため、spawn_blockingを用いてOSスレッド上で同期コピー（完了待機）を行う
+        // これにより、イベントのポーリングによるReadLockの枯渇を防ぐ
+        let (h_disp, h_sq_disp) = tokio::task::spawn_blocking(move || {
+            let h_disp = stream.clone_dtoh(&dev_disp).unwrap();
+            let h_sq_disp = stream.clone_dtoh(&dev_sq_disp).unwrap();
+            (h_disp[0], h_sq_disp[0])
+        })
+        .await
+        .unwrap();
 
         let mean_displacement = h_disp / ENSEMBLE_SIZE as f64;
         let mean_square_displacement = h_sq_disp / ENSEMBLE_SIZE as f64;
