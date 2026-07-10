@@ -1,6 +1,6 @@
 {
   "name": "dumbbell",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "image": "nvidia/cuda:12.2.0-devel-ubuntu22.04",
   "workspaceFolder": "/workspace",
   "mounts": [
     {
@@ -37,12 +37,6 @@
     "ghcr.io/devcontainers/features/rust:1": {
       "version": "1.96.0"
     },
-    "ghcr.io/devcontainers/features/nvidia-cuda:3": {
-      "installCudnn": true,
-      "installToolkit": true,
-      "installCudnnDev": true,
-      "cudaVersion": "12.2"
-    },
     "ghcr.io/devcontainers-extra/features/apt-packages:1": {
       "packages": "build-essential, clang, mold, ripgrep, fd-find, tmux"
     }
@@ -52,9 +46,7 @@
   "postCreateCommand": "cargo fetch",
   "containerEnv": {
     "CARGO_TERM_COLOR": "always",
-    "SSH_AUTH_SOCK": "/ssh-agent",
-    "PATH": "/usr/local/cuda/bin:${containerEnv:PATH}",
-    "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:${containerEnv:LD_LIBRARY_PATH}"
+    "SSH_AUTH_SOCK": "/ssh-agent"
   },
   "customizations": {
     "vscode": {
