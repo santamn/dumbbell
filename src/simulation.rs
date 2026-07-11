@@ -136,7 +136,7 @@ fn perpendicular_foot<W: Wall>(point: &Point2<f64>) -> Point2<f64> {
 
         // 点 (x_0, y_0) から境界上の点 (x, f(x)) に降ろした垂線が満たす方程式: (x - x_0) + f'(x) * (f(x) - y_0) = 0
         // ニュートン法の更新式: x_next = x - (x - x_0 + f'(x) * (f(x) - y_0)) / (1 + f'(x)^2 - f''(x) * (f(x) - y_0))
-        let d = (x - point.x + p * h) / (1.0 + p * p - W::SIGN * omega_derivative_second(x) * h);
+        let d = (x - point.x + p * h) / (1.0 + p * p + W::SIGN * omega_derivative_second(x) * h);
 
         (d.abs() > 1e-10).then_some(x - d)
     })
