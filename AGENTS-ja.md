@@ -1,43 +1,39 @@
-# dummbell 開発ガイド
+# dummbell
 
-## 概要
+## プロジェクト概要
 
-## コンピュータアーキテクチャ
+この dumbell は Rust と CUDA を用いて実装されたブラウン運動のシミュレーションプログラムである。
 
-### ハードウェア情報
+## シミュレーションの物理モデル
 
-| 項目 |  |
-| :--- | :--- |
-| CPU | AMD EPYC 7502P / 32 Core |
-| GPU | NVIDIA Tesla A100 40GB x 3, NVIDIA Tesla A100 80GB x 1 |
-| Memory | DDR4-3200 32 GB x 8 |
-| Storage | Samsung SSD 870 7.28 T |
-| Linux Kernel | 5.15.0-97-generic |
+シミュレーションではブラウン運動を行う粒子は、2つの点が剛体の棒で結合された構造（=ダンベル型粒子）として扱われる。詳細な物理モデルについては [model.md](docs/model.md) に書かれている。必要があれば参照せよ。
 
-### GPU 情報
+## 計算機アーキテクチャ
 
-```
-+---------------------------------------------------------------------------------------+
-| NVIDIA-SMI 535.161.07             Driver Version: 535.161.07   CUDA Version: 12.2     |
-|-----------------------------------------+----------------------+----------------------+
-| GPU  Name                 Persistence-M | Bus-Id        Disp.A | Volatile Uncorr. ECC |
-| Fan  Temp   Perf          Pwr:Usage/Cap |         Memory-Usage | GPU-Util  Compute M. |
-|                                         |                      |               MIG M. |
-|=========================================+======================+======================|
-|   0  NVIDIA A100-PCIE-40GB          Off | 00000000:01:00.0 Off |                    0 |
-| N/A   27C    P0              32W / 250W |      0MiB / 40960MiB |      0%      Default |
-|                                         |                      |             Disabled |
-+-----------------------------------------+----------------------+----------------------+
-|   1  NVIDIA A100-PCIE-40GB          Off | 00000000:41:00.0 Off |                    0 |
-| N/A   27C    P0              33W / 250W |      0MiB / 40960MiB |      0%      Default |
-|                                         |                      |             Disabled |
-+-----------------------------------------+----------------------+----------------------+
-|   2  NVIDIA A100-PCIE-40GB          Off | 00000000:81:00.0 Off |                    0 |
-| N/A   27C    P0              32W / 250W |      0MiB / 40960MiB |      0%      Default |
-|                                         |                      |             Disabled |
-+-----------------------------------------+----------------------+----------------------+
-|   3  NVIDIA A100 80GB PCIe          Off | 00000000:C1:00.0 Off |                    0 |
-| N/A   30C    P0              43W / 300W |      0MiB / 81920MiB |      0%      Default |
-|                                         |                      |             Disabled |
-+-----------------------------------------+----------------------+----------------------+
-```
+GPU を用いた計算を行う際に使用する計算機のアーキテクチャについては [architecture.md](docs/architecture.md) に書かれている。最適化などを行う際は計算機のアーキテクチャを理解しておくことは重要である。
+
+## コード品質向上施作
+
+- 適切な抽象化・具象化・ライブラリの利用によって複雑さを抑えること
+  - 不要になったコードやライブラリは削除すること
+- ライブラリを使用する際はそのライブラリのドキュメントを参照し、適切な使い方をすること
+  - ライブラリのバージョン指定の方法はドキュメントを参照すること
+  - 特にドキュメントに指示がない場合は最新の安定版を使用すること
+- 関数・構造体・その他意味的にまとまりのあるコード片に対して、必ずその意味を説明するコメントを日本語で付与すること
+- コードの可読性を向上させるために、『リーダブルコード』などの既存のベストプラクティスを意識してコードのリファクタリングを行うこと
+  - 特に、一定以上コードベースに大きな追加・変更を加えた際は、その変更を踏まえてコードベース全体のリファクタリングを行うこと
+
+## animation について
+
+- animation における粒子の物理モデルと simulation における粒子の物理モデルは常に一致するようすること
+  - この同期を行うために両者の物理モデルにおける意味的な差分を解消した際は、必ずそのことを宣言すること
+
+## Command line tools
+
+You can use the following command-line tools to perform searches, edits, and code analysis with AI agents more efficiently and quickly.
+
+- ripgrep (`rg`): Fast text/regex search across the repo. Prefer this over `grep -r`. Respects .gitignore by default. Examples: `rg 'pattern'`, `rg -n --glob '*.ts' 'foo'`, `rg -l 'TODO'` (files only), `rg -F 'literal string'` (no regex).
+- fd (`fdfind`): Fast file/directory finder. Prefer this over `find`.Respects .gitignore, case-insensitive smart matching. Examples: `fd config`, `fd -e py` (by extension), `fd -t d src` (directories only), `fd -H` (include hidden).
+- ax: Local HTTP and HTML I/O for coding agents. One command instead of curl + throwaway Python. Run `ax agent-context` to learn it — use it instead of throwaway scripts.
+- ast-grep (`sg`): Structural (AST-based) code search and rewrite. Use when text regex is too fragile — matching syntax, not strings. Examples: `sg -p 'console.log($ARG)' -l ts` (search), `sg -p 'foo($A)' -r 'bar($A)' -U` (rewrite in place). `$VAR` matches one node, `$$$` matches many.
+- sem: Semantic code search — finds code by meaning, not exact text. Use for "where is X handled?"-style questions when you don't know the identifier names. Example: `sem "retry logic for failed uploads"`. Fall back to `rg` once you  know the concrete symbol.

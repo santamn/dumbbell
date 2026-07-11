@@ -99,13 +99,14 @@ d\Phi_t &= \frac{1}{\tilde{l}}\left\{ 2 C_1\cos\Phi_t (1 + C_2\sin\Phi_t) + \bol
 \end{aligned}
 $$
 
-ここで、$\boldsymbol{W}_t$ は2次元の標準ブラウン運動、$B_t$ は $\boldsymbol{W}_t$ と独立な1次元の標準ブラウン運動である。
+この確率微分方程式に基づいて、Euler–Maruyama 法を用いて数値シミュレーションを行う。ここで、$\boldsymbol{W}_t$ は2次元の標準ブラウン運動、$B_t$ は $\boldsymbol{W}_t$ と独立な1次元の標準ブラウン運動である。
 
-$$\begin{aligned}
-&\mathbb{E}\left[d\boldsymbol{W}_t\right] = \boldsymbol{0}
-&\mathbb{E}\left[d\boldsymbol{W}_t d\boldsymbol{W}_t^{\top}\right] = \boldsymbol{I} dt \\
-&\mathbb{E}\left[dB_t\right] = 0
-&\mathbb{E}\left[(dB_t)^2\right] = dt
+$$
+\begin{aligned}
+  &\mathbb{E}\left[d\boldsymbol{W}_t\right] = \boldsymbol{0}
+  &\mathbb{E}\left[d\boldsymbol{W}_t d\boldsymbol{W}_t^{\top}\right] = \boldsymbol{I} dt \\
+  &\mathbb{E}\left[dB_t\right] = 0
+  &\mathbb{E}\left[(dB_t)^2\right] = dt
 \end{aligned}
 $$
 
