@@ -19,7 +19,7 @@ The architecture of the machine used for GPU-based computation is described in [
 - When using a library, consult its documentation and use it correctly
   - Refer to the documentation for how to specify library versions
   - Unless the documentation instructs otherwise, use the latest stable version
-- Always attach comments in Japanese explaining the meaning of functions, structs, and any other semantically cohesive pieces of code
+- Always attach comments **in Japanese** explaining the meaning of functions, structs, and any other semantically cohesive pieces of code
 - Refactor code following established best practices such as those in *The Art of Readable Code* to improve readability
   - In particular, after making substantial additions or changes to the codebase, refactor the entire codebase in light of those changes
 

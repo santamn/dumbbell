@@ -1,155 +1,257 @@
-use crate::simulation::{Particle, STEPS, omega};
-use eframe::egui::{CentralPanel, Color32, Context, Pos2, Rect, Sense, Stroke, TopBottomPanel};
-use nalgebra::{Point2, Vector2};
-use rand::{SeedableRng, rngs::SmallRng};
-use std::cell::OnceCell;
-use std::f64::consts::TAU;
-use std::ops::Range;
+//! シミュレーションのアニメーション表示。
+//!
+//! 1粒子のブラウン運動をリアルタイムに描画する。シード値・外力 f・C1・C2 は
+//! GUIから変更でき、f/C1/C2 は実行中の粒子に即座に反映される(シードはReset時に反映)。
+//! カメラは x 方向にのみ粒子を追いかける。ブラウン運動の細かな揺れに画面が
+//! 追従するとガタつくため、デッドゾーン+一次遅れ(指数平滑)で滑らかに追従させる。
+//!
+//! ※ egui の標準フォントは日本語グリフを含まないため、UIのラベルは英語表記とする。
 
-const BOUNDARY_SAMPLING_STRIDE: f64 = 0.001;
-const LOCAL_MINIUM_POINT: f64 = -0.190359162688;
-const Y_MAX: f64 = 2.23;
-const Y_MIN: f64 = -2.23;
+use crate::config::Config;
+use crate::simulation::{ModelParams, Particle, State, omega};
+use anyhow::Result;
+use eframe::egui::{
+    self, CentralPanel, Color32, Context, DragValue, Pos2, Rect, Sense, Shape, Slider, Stroke,
+    TopBottomPanel,
+};
+use nalgebra::Point2;
+use rand::{SeedableRng, rngs::SmallRng};
+use std::f64::consts::TAU;
+
+/// 表示する x 方向の範囲(カメラ中心 ± この値)
+const VIEW_HALF_WIDTH: f64 = 1.5;
+/// 表示する y 方向の範囲(チャネルの最大幅 max ω ≈ 2.221 を覆う)
+const Y_MAX: f64 = 2.3;
+/// カメラのデッドゾーン: 粒子が画面中央から±この距離に収まっている間はカメラを動かさない
+const CAMERA_DEAD_ZONE: f64 = 0.6;
+/// カメラ追従の時定数 [秒]。大きいほどゆったり追いかける
+const CAMERA_TIME_CONSTANT: f64 = 0.5;
+/// 境界線を折れ線近似するときの x 方向サンプリング間隔
+const BOUNDARY_SAMPLING_STRIDE: f64 = 0.002;
+
+/// アニメーションウィンドウを開き、閉じられるまでブロックする
+pub fn run_animation(config: &Config) -> Result<()> {
+    // 初期パラメータは設定ファイルの各リストの先頭値を使う(GUIで変更可能)
+    let params = ModelParams {
+        delta_t: config.delta_t,
+        spring_k: config.k,
+        length: config.l[0],
+        force_x: config.f[0],
+        c_1: config.c_1[0],
+        c_2: config.c_2[0],
+    };
+    let app = SimApp::new(0, params, config.steps());
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 680.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Dumbbell Brownian Motion Viewer",
+        options,
+        Box::new(|_| Ok(Box::new(app))),
+    )
+    .map_err(|e| anyhow::anyhow!("アニメーションの起動に失敗: {e}"))
+}
 
 /// シミュレーションの可視化を管理するアプリケーション構造体
-pub struct SimApp {
-    boundary: OnceCell<(Vec<Pos2>, Vec<Pos2>)>, // チャネルの境界線
-    current_step: usize,                        // 現在のシミュレーションステップ
-    particle: Particle<SmallRng>,               // 粒子の軌跡を逐次生成するイテレータ
-    running: bool,                              // アニメーションが進行中かどうか
-    sample_stride: usize,                       // 1フレームで進めるステップ数
-    trail: Vec<Pos2>,                           // 粒子の軌跡を保存するバッファ
-    x_range: Range<f64>,                        // 描画するx座標の範囲
+struct SimApp {
+    particle: Particle<SmallRng>, // シミュレーション本体
+    initial_state: State,         // 初期状態(ゴースト表示と情報表示に使う)
+    seed: u64,                    // GUIで編集中のシード値(Resetで反映)
+    total_steps: u64,             // 総ステップ数 T/Δt
+    current_step: u64,            // 現在のステップ数
+    steps_per_frame: u64,         // 1フレームに進めるステップ数
+    running: bool,                // アニメーションが進行中かどうか
+    camera_x: f64,                // カメラ中心の x 座標(平滑化済み)
+    trail: Vec<Point2<f64>>,      // 重心の軌跡(ワールド座標)
 }
 
 impl SimApp {
-    pub fn new(
-        seed: u64,
-        sample_stride: usize,
-        x_range: Range<f64>,
-        rod_length: f64,
-        force: Vector2<f64>,
-    ) -> Self {
+    fn new(seed: u64, params: ModelParams, total_steps: u64) -> Self {
+        let particle = Particle::new(SmallRng::seed_from_u64(seed), params);
+        let initial_state = particle.state();
         Self {
-            boundary: OnceCell::new(),
+            particle,
+            initial_state,
+            seed,
+            total_steps,
             current_step: 0,
-            particle: Particle::new(SmallRng::seed_from_u64(seed), rod_length, force),
+            steps_per_frame: 5_000,
             running: true,
-            sample_stride,
-            trail: Vec::with_capacity(STEPS / sample_stride + 1),
-            x_range: (x_range.start - LOCAL_MINIUM_POINT).floor() + LOCAL_MINIUM_POINT
-                ..(x_range.end - LOCAL_MINIUM_POINT).ceil() + LOCAL_MINIUM_POINT,
+            camera_x: initial_state.position.x,
+            trail: vec![initial_state.position],
         }
     }
 
-    /// シミュレーション上の座標を表示画面上の座標系に変換する
-    fn screen_position(&self, rect: Rect, point: Point2<f64>) -> Pos2 {
-        let real_w = (self.x_range.end - self.x_range.start) as f32;
-        let real_h = (Y_MAX - Y_MIN) as f32;
-        let scale = (rect.width() / real_w).min(rect.height() / real_h);
+    /// 現在のシード値とパラメータでシミュレーションを最初からやり直す
+    fn reset(&mut self) {
+        let params = self.particle.params;
+        self.particle = Particle::new(SmallRng::seed_from_u64(self.seed), params);
+        self.initial_state = self.particle.state();
+        self.current_step = 0;
+        self.running = true;
+        self.camera_x = self.initial_state.position.x;
+        self.trail = vec![self.initial_state.position];
+    }
 
-        let center_x = 0.5 * (self.x_range.start + self.x_range.end) as f32;
-        rect.center() + egui::vec2(point.x as f32 - center_x, point.y as f32) * scale
+    /// カメラを粒子に追従させる。デッドゾーン内では動かさず、
+    /// はみ出した分だけを一次遅れで滑らかに詰めることで画面のガタつきを防ぐ
+    fn follow_particle(&mut self, frame_dt: f64) {
+        let offset = self.particle.state().position.x - self.camera_x;
+        let overshoot = offset.abs() - CAMERA_DEAD_ZONE;
+        if overshoot > 0.0 {
+            let alpha = 1.0 - (-frame_dt / CAMERA_TIME_CONSTANT).exp();
+            self.camera_x += overshoot * offset.signum() * alpha;
+        }
+    }
+
+    /// ワールド座標から画面座標への変換を表すクロージャを作る(y軸は上向きが正)
+    fn world_to_screen(&self, rect: Rect) -> impl Fn(Point2<f64>) -> Pos2 {
+        let scale = (rect.width() / (2.0 * VIEW_HALF_WIDTH) as f32)
+            .min(rect.height() / (2.0 * Y_MAX) as f32);
+        let center = rect.center();
+        let camera_x = self.camera_x;
+        move |p: Point2<f64>| center + egui::vec2((p.x - camera_x) as f32, -p.y as f32) * scale
     }
 }
 
 impl eframe::App for SimApp {
-    /// 毎フレームのUI更新。入力反映と描画を担当する
+    /// 毎フレームのUI更新。シミュレーションの前進・GUI操作の反映・描画を行う
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        // シミュレーションの状態をsample_stride分だけ進める
+        // シミュレーションを進める
         if self.running {
-            self.particle
-                .nth((self.sample_stride - 1).min(self.current_step))
-                .unwrap();
+            let n = self
+                .steps_per_frame
+                .min(self.total_steps - self.current_step);
+            self.particle.advance(n as usize);
+            self.current_step += n;
+            self.trail.push(self.particle.state().position);
+            if self.current_step >= self.total_steps {
+                self.running = false;
+            }
         }
-        let state = self.particle.now();
 
-        // 現在のシミュレーションの状態を表示するUIパネルを上部に配置
+        // 操作パネル(上部)
         TopBottomPanel::top("controls").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui
-                    .button(if self.running { "Pause" } else { "Start" })
+                    .button(if self.running { "Pause" } else { "Resume" })
                     .clicked()
                 {
                     self.running = !self.running;
                 }
+                if ui.button("Reset").clicked() {
+                    self.reset();
+                }
                 ui.separator();
-                ui.label(format!("step = {} / {}", self.current_step, STEPS));
+
+                // シードはResetを押したときに反映される
+                ui.label("seed:");
+                ui.add(DragValue::new(&mut self.seed).speed(1));
+                ui.separator();
+
+                // f, C1, C2 は実行中の粒子に即座に反映される
+                let params = &mut self.particle.params;
+                ui.label("f:");
+                ui.add(DragValue::new(&mut params.force_x).speed(0.5));
+                ui.label("C1:");
+                ui.add(DragValue::new(&mut params.c_1).speed(0.1));
+                ui.label("C2:");
+                ui.add(DragValue::new(&mut params.c_2).speed(0.01));
+                ui.separator();
+
+                ui.add(
+                    Slider::new(&mut self.steps_per_frame, 1..=100_000)
+                        .logarithmic(true)
+                        .text("steps/frame"),
+                );
+            });
+
+            // 初期状態と現在の状態の表示
+            ui.horizontal(|ui| {
+                let now = self.particle.state();
                 ui.label(format!(
-                    "force = ({:.3}, {:.3})",
-                    self.particle.force().x,
-                    self.particle.force().y
+                    "step {} / {}  (t = {:.4})",
+                    self.current_step,
+                    self.total_steps,
+                    self.current_step as f64 * self.particle.params.delta_t,
                 ));
+                ui.separator();
                 ui.label(format!(
-                    "position = ({:.4} {:.4})",
-                    state.position.x, state.position.y
+                    "initial: x = {:.4}, y = {:.4}, Φ = {:.4}",
+                    self.initial_state.position.x,
+                    self.initial_state.position.y,
+                    self.initial_state.angle.rem_euclid(TAU),
                 ));
-                ui.label(format!("Φ = {:.4} [rad]", state.angle.rem_euclid(TAU)));
+                ui.separator();
+                ui.label(format!(
+                    "current: x = {:.4}, y = {:.4}, Φ = {:.4}",
+                    now.position.x,
+                    now.position.y,
+                    now.angle.rem_euclid(TAU),
+                ));
             });
         });
 
-        // 粒子の軌跡を描画する中央のパネルを配置
+        // 描画パネル(中央)
         CentralPanel::default().show(ctx, |ui| {
+            // カメラの更新は描画の直前に行う(フレーム時間で平滑化)
+            let frame_dt = ctx.input(|i| i.stable_dt).min(0.1) as f64;
+            self.follow_particle(frame_dt);
+
             let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::empty());
             let painter = ui.painter_at(rect);
+            let to_screen = self.world_to_screen(rect);
 
-            // 境界線の座標は一度のみ計算する
-            let (upper_boundary, lower_boundary) = self.boundary.get_or_init(|| {
-                (0..=((self.x_range.end - self.x_range.start) / BOUNDARY_SAMPLING_STRIDE) as usize)
-                    .map(|i| {
-                        let x = self.x_range.start + i as f64 * BOUNDARY_SAMPLING_STRIDE;
-                        let y = omega(x);
-                        (
-                            self.screen_position(rect, Point2::new(x, y)),
-                            self.screen_position(rect, Point2::new(x, -y)),
-                        )
-                    })
-                    .unzip()
-            });
-
-            // 上下の境界線の描画
-            let stroke_wall = Stroke::new(1.4, Color32::from_rgb(120, 180, 220));
-            upper_boundary.windows(2).for_each(|window| {
-                painter.line_segment([window[0], window[1]], stroke_wall);
-            });
-            lower_boundary.windows(2).for_each(|window| {
-                painter.line_segment([window[0], window[1]], stroke_wall);
-            });
+            // チャネル境界の描画(カメラが動くため毎フレーム可視範囲を計算する)
+            let samples = (2.0 * VIEW_HALF_WIDTH / BOUNDARY_SAMPLING_STRIDE) as usize;
+            let (upper, lower): (Vec<Pos2>, Vec<Pos2>) = (0..=samples)
+                .map(|i| {
+                    let x = self.camera_x - VIEW_HALF_WIDTH + i as f64 * BOUNDARY_SAMPLING_STRIDE;
+                    let y = omega(x);
+                    (to_screen(Point2::new(x, y)), to_screen(Point2::new(x, -y)))
+                })
+                .unzip();
+            let wall_stroke = Stroke::new(1.4, Color32::from_rgb(120, 180, 220));
+            painter.add(Shape::line(upper, wall_stroke));
+            painter.add(Shape::line(lower, wall_stroke));
 
             // 軌跡の描画
-            if self.running {
-                self.trail.push(self.screen_position(rect, state.position));
-            }
-            let stroke_trail = Stroke::new(1.0, Color32::from_rgb(255, 170, 90));
-            self.trail.windows(2).for_each(|window| {
-                painter.line_segment([window[0], window[1]], stroke_trail);
-            });
+            let trail_points: Vec<Pos2> = self.trail.iter().map(|&p| to_screen(p)).collect();
+            painter.add(Shape::line(
+                trail_points,
+                Stroke::new(1.0, Color32::from_rgb(255, 170, 90)),
+            ));
 
-            // 粒子の描画
-            let (p1, p2) = self.particle.endpoints();
-            // 棒
+            // 初期状態のゴースト表示(半透明の棒)
+            let (init_plus, init_minus) = self.initial_state.endpoints(self.particle.params.length);
             painter.line_segment(
-                [
-                    self.screen_position(rect, p1),
-                    self.screen_position(rect, p2),
-                ],
+                [to_screen(init_plus), to_screen(init_minus)],
+                Stroke::new(3.0, Color32::from_rgba_unmultiplied(160, 160, 160, 120)),
+            );
+            painter.circle_filled(
+                to_screen(self.initial_state.position),
+                1.5,
+                Color32::from_rgba_unmultiplied(220, 220, 220, 120),
+            );
+
+            // 現在の粒子の描画(棒の + 端を明るい色にして向きが分かるようにする)
+            let (p_plus, p_minus) = self.particle.endpoints();
+            painter.line_segment(
+                [to_screen(p_plus), to_screen(p_minus)],
                 Stroke::new(3.0, Color32::from_rgb(230, 90, 60)),
             );
-            // 粒子の中心
+            painter.circle_filled(to_screen(p_plus), 3.0, Color32::from_rgb(255, 200, 80));
             painter.circle_filled(
-                self.screen_position(rect, state.position),
+                to_screen(self.particle.state().position),
                 1.5,
                 Color32::WHITE,
             );
         });
 
         if self.running {
-            if self.current_step < STEPS {
-                self.current_step += self.sample_stride;
-                ctx.request_repaint();
-            } else {
-                self.running = false;
-            }
+            ctx.request_repaint();
         }
     }
 }
