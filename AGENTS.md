@@ -32,8 +32,30 @@ The architecture of the machine used for GPU-based computation is described in [
 
 You can use the following command-line tools to perform searches, edits, and code analysis with AI agents more efficiently and quickly.
 
-- ripgrep (`rg`): Fast text/regex search across the repo. Prefer this over `grep -r`. Respects .gitignore by default. Examples: `rg 'pattern'`, `rg -n --glob '*.ts' 'foo'`, `rg -l 'TODO'` (files only), `rg -F 'literal string'` (no regex).
-- fd (`fdfind`): Fast file/directory finder. Prefer this over `find`. Respects .gitignore, case-insensitive smart matching. Examples: `fd config`, `fd -e py` (by extension), `fd -t d src` (directories only), `fd -H` (include hidden).
+- ripgrep (`rg`): Fast text/regex search across the repo. Prefer this over `grep -r`. Respects .gitignore by default. 
+  - Examples:
+    - `rg 'pattern'`
+    - `rg -n --glob '*.ts' 'foo'`
+    - `rg -l 'TODO'` (files only)
+    - `rg -F 'literal string'` (no regex)
+- fd (`fdfind`): Fast file/directory finder. Prefer this over `find`. Respects .gitignore, case-insensitive smart matching. 
+  - Examples: 
+    - `fdfind config`
+    - `fdfind -e py` (by extension)
+    - `fdfind -t d src` (directories only)
+    - `fdfind -H` (include hidden)
 - ax: Local HTTP and HTML I/O for coding agents. One command instead of curl + throwaway Python. Run `ax agent-context` to learn it — use it instead of throwaway scripts.
-- ast-grep (`sg`): Structural (AST-based) code search and rewrite. Use when text regex is too fragile — matching syntax, not strings. Examples: `sg -p 'console.log($ARG)' -l ts` (search), `sg -p 'foo($A)' -r 'bar($A)' -U` (rewrite in place). `$VAR` matches one node, `$$$` matches many.
-- sem: Semantic code search — finds code by meaning, not exact text. Use for "where is X handled?"-style questions when you don't know the identifier names. Example: `sem "retry logic for failed uploads"`. Fall back to `rg` once you know the concrete symbol.
+- ast-grep (`sg`): Structural (AST-based) code search and rewrite. Use when text regex is too fragile — matching syntax, not strings. 
+  - Examples: 
+    - `sg -p 'console.log($ARG)' -l ts`: search
+    - `sg -p 'foo($A)' -r 'bar($A)' -U`: rewrite in place. `$VAR` matches one node, `$$$` matches many.
+- sem: Semantic version control on top of git. Parses code with tree-sitter and diffs, blames, and analyzes impact at the entity level (functions, classes, methods, structs) instead of lines. Prefer this over `git diff` / `git blame` when you care about *which entities* changed rather than which lines. Works in any git repo with no setup.
+  - Examples:
+    - `sem diff`
+    - `sem diff --staged`
+    - `sem diff --format json`
+    - What breaks if an entity changes (dependencies & dependents): `sem impact simulate_step`
+    - `sem blame src/simulation.rs`
+    - `sem log simulate_step`
+    - `sem entities src/`
+    - Token-budgeted context (entity + deps + dependents) for LLMs: `sem context simulate_step --budget 4000`
