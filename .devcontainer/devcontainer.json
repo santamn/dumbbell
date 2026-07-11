@@ -43,7 +43,7 @@
   },
   "runArgs": ["--device=nvidia.com/gpu=all"],
   "containerUser": "tutu",
-  "postCreateCommand": "cargo fetch",
+  "postCreateCommand": "cargo fetch && curl -fsSL https://ax.yusuke.run/install | sh",
   "containerEnv": {
     "CARGO_TERM_COLOR": "always",
     "SSH_AUTH_SOCK": "/ssh-agent"
