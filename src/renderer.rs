@@ -11,8 +11,8 @@ use crate::config::Config;
 use crate::simulation::{ModelParams, Particle, State, omega};
 use anyhow::Result;
 use eframe::egui::{
-    self, CentralPanel, Color32, Context, DragValue, Pos2, Rect, Sense, Shape, Slider, Stroke,
-    TopBottomPanel,
+    self, CentralPanel, Color32, Context, DragValue, Panel, Pos2, Rect, Sense, Shape, Slider,
+    Stroke, Ui,
 };
 use nalgebra::Point2;
 use rand::{SeedableRng, rngs::SmallRng};
@@ -117,10 +117,11 @@ impl SimApp {
 }
 
 impl eframe::App for SimApp {
-    /// 毎フレームのUI更新。シミュレーションの前進・GUI操作の反映・描画を行う
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        // シミュレーションを進める
+    /// 毎フレームのロジック更新(描画前に呼ばれる)。
+    /// シミュレーションの前進とカメラ追従を行い、描画は `ui` に任せる
+    fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         if self.running {
+            // シミュレーションを進める
             let n = self
                 .steps_per_frame
                 .min(self.total_steps - self.current_step);
@@ -130,10 +131,19 @@ impl eframe::App for SimApp {
             if self.current_step >= self.total_steps {
                 self.running = false;
             }
-        }
 
+            // カメラを粒子に追従させる(フレーム時間で平滑化)
+            let frame_dt = ctx.input(|i| i.stable_dt).min(0.1) as f64;
+            self.follow_particle(frame_dt);
+
+            ctx.request_repaint();
+        }
+    }
+
+    /// 毎フレームのUI更新。GUI操作の反映と描画を行う
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         // 操作パネル(上部)
-        TopBottomPanel::top("controls").show(ctx, |ui| {
+        Panel::top("controls").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui
                     .button(if self.running { "Pause" } else { "Resume" })
@@ -195,11 +205,7 @@ impl eframe::App for SimApp {
         });
 
         // 描画パネル(中央)
-        CentralPanel::default().show(ctx, |ui| {
-            // カメラの更新は描画の直前に行う(フレーム時間で平滑化)
-            let frame_dt = ctx.input(|i| i.stable_dt).min(0.1) as f64;
-            self.follow_particle(frame_dt);
-
+        CentralPanel::default().show(ui, |ui| {
             let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::empty());
             let painter = ui.painter_at(rect);
             let to_screen = self.world_to_screen(rect);
@@ -249,9 +255,5 @@ impl eframe::App for SimApp {
                 Color32::WHITE,
             );
         });
-
-        if self.running {
-            ctx.request_repaint();
-        }
     }
 }
