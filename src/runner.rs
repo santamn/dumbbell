@@ -7,7 +7,6 @@
 use crate::config::{Case, Config};
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use serde::Serialize;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
@@ -40,7 +39,7 @@ impl CaseStatistics {
     }
 }
 
-/// 設定された全ケースを実行し、ケースごとのフォルダと全体のまとめファイルに結果を書き出す
+/// 設定された全ケースを実行し、まとめファイル(summary.dat)と設定のコピーを書き出す
 pub fn run_all(config: &Config, config_path: &Path) -> Result<()> {
     let total_start = Instant::now();
     let cases = config.cases();
@@ -71,6 +70,9 @@ pub fn run_all(config: &Config, config_path: &Path) -> Result<()> {
             .unwrap()
             .progress_chars("=>-"),
     );
+    // バーは放っておくと更新イベント(inc等)まで一度も描画されない。ケースは数分〜数十分
+    // かかるため、定期tickで実行開始直後から表示し、経過時間も更新され続けるようにする
+    progress.enable_steady_tick(Duration::from_millis(500));
 
     // ワーカーが計算した (ケース番号, モーメント, そのケースの所要時間) を受け取るチャネル
     let (tx, rx) = std::sync::mpsc::channel();
@@ -80,7 +82,6 @@ pub fn run_all(config: &Config, config_path: &Path) -> Result<()> {
     for (index, mean_disp, mean_sq_disp, elapsed) in rx {
         let case = cases[index];
         let stats = CaseStatistics::from_moments(mean_disp, mean_sq_disp, config.time, case.f);
-        write_case_result(config, &case, &stats)?;
         writeln!(
             summary,
             "{} {} {} {} {} {} {} {}",
@@ -97,10 +98,10 @@ pub fn run_all(config: &Config, config_path: &Path) -> Result<()> {
 
         progress.println(format!(
             "完了: {} ({:.1}秒)",
-            case.dir_name(),
+            case.label(),
             elapsed.as_secs_f64()
         ));
-        progress.set_message(format!("完了: {}", case.dir_name()));
+        progress.set_message(format!("完了: {}", case.label()));
         progress.inc(1);
     }
 
@@ -116,51 +117,6 @@ pub fn run_all(config: &Config, config_path: &Path) -> Result<()> {
         total_elapsed.as_secs_f64(),
         config.output_dir.display()
     ));
-    Ok(())
-}
-
-/// ケースごとのフォルダに、再現用の設定と統計量を書き出す
-fn write_case_result(config: &Config, case: &Case, stats: &CaseStatistics) -> Result<()> {
-    /// ケースフォルダに書き出す再現用設定(このファイルだけで1ケースを再現できる)
-    #[derive(Serialize)]
-    struct CaseRecord {
-        delta_t: f64,
-        time: f64,
-        k: f64,
-        ensemble_size: u32,
-        f: f64,
-        c_1: f64,
-        c_2: f64,
-        l: f64,
-        seed: u64,
-    }
-
-    let dir = config.output_dir.join(case.dir_name());
-    std::fs::create_dir_all(&dir)?;
-
-    let record = CaseRecord {
-        delta_t: config.delta_t,
-        time: config.time,
-        k: config.k,
-        ensemble_size: config.ensemble_size,
-        f: case.f,
-        c_1: case.c_1,
-        c_2: case.c_2,
-        l: case.l,
-        seed: case.seed(),
-    };
-    std::fs::write(dir.join("config.toml"), toml::to_string(&record)?)?;
-
-    let mut result = File::create(dir.join("result.dat"))?;
-    writeln!(result, "# mean_disp mu d_eff mfpt")?;
-    writeln!(
-        result,
-        "{} {} {} {}",
-        stats.mean_displacement,
-        stats.nonlinear_mobility,
-        stats.effective_diffusion,
-        stats.mean_first_passage_time,
-    )?;
     Ok(())
 }
 

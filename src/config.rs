@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer};
 use std::path::{Path, PathBuf};
 
 /// 数値または "1/3" のような分数文字列を受け付けて f64 のリストにデシリアライズする
@@ -147,7 +147,7 @@ impl Config {
     }
 }
 
-/// フォルダ名用に、値を小数点以下6桁に丸めた上で末尾の余分な0や"."を取り除いて整形する
+/// 表示用に、値を小数点以下6桁に丸めた上で末尾の余分な0や"."を取り除いて整形する
 fn format_param(value: f64) -> String {
     let rounded = format!("{value:.6}");
     let trimmed = rounded.trim_end_matches('0').trim_end_matches('.');
@@ -159,7 +159,7 @@ fn format_param(value: f64) -> String {
 }
 
 /// 1回のシミュレーションに対応するパラメータの組
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct Case {
     pub f: f64,
     pub c_1: f64,
@@ -168,9 +168,9 @@ pub struct Case {
 }
 
 impl Case {
-    /// このケースの結果を保存するフォルダ名(例: "f-10_c1-2_c2-0.5_l-0.05")。
+    /// 進捗表示用のケース名(例: "f-10_c1-2_c2-0.5_l-0.05")。
     /// "1/3" のような分数指定で無限小数になった値も、小数点以下6桁に丸めて短く表示する。
-    pub fn dir_name(&self) -> String {
+    pub fn label(&self) -> String {
         format!(
             "f-{}_c1-{}_c2-{}_l-{}",
             format_param(self.f),
@@ -220,13 +220,13 @@ l = [0.04]
     }
 
     #[test]
-    fn dir_name_stays_short_for_repeating_decimals() {
+    fn label_stays_short_for_repeating_decimals() {
         let case = Case {
             f: 10.0,
             c_1: 1.0 / 3.0,
             c_2: -1.0 / 3.0,
             l: 0.04,
         };
-        assert_eq!(case.dir_name(), "f-10_c1-0.333333_c2--0.333333_l-0.04");
+        assert_eq!(case.label(), "f-10_c1-0.333333_c2--0.333333_l-0.04");
     }
 }
