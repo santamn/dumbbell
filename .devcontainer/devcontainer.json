@@ -2,6 +2,7 @@
   "name": "dumbbell",
   "image": "nvidia/cuda:12.2.0-devel-ubuntu22.04",
   "workspaceFolder": "/workspace",
+  "shutdownAction": "none",
   "mounts": [
     {
       "source": "${localWorkspaceFolder}",
@@ -67,7 +68,10 @@
         "tamasfe.even-better-toml",
         "NVIDIA.nsight-vscode-edition",
         "anthropic.claude-code"
-      ]
+      ],
+      "settings": {
+        "terminal.integrated.persistentSessionReviveProcess": "never"
+      }
     }
   }
 }
