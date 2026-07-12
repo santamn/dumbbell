@@ -1,6 +1,57 @@
 use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
+
+/// 数値または "1/3" のような分数文字列を受け付けて f64 のリストにデシリアライズする
+fn deserialize_frac_vec<'de, D>(deserializer: D) -> Result<Vec<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum FracValue {
+        Number(f64),
+        Text(String),
+    }
+
+    Vec::<FracValue>::deserialize(deserializer)?
+        .into_iter()
+        .map(|v| match v {
+            FracValue::Number(n) => Ok(n),
+            FracValue::Text(s) => parse_fraction(&s).map_err(serde::de::Error::custom),
+        })
+        .collect()
+}
+
+/// "分子/分母" 形式、または通常の数値文字列を f64 に変換する
+fn parse_fraction(s: &str) -> Result<f64, String> {
+    match s.split_once('/') {
+        Some((num, den)) => {
+            let num: f64 = num
+                .trim()
+                .parse()
+                .map_err(|_| format!("不正な分数表記です: \"{s}\""))?;
+            let den: f64 = den
+                .trim()
+                .parse()
+                .map_err(|_| format!("不正な分数表記です: \"{s}\""))?;
+            ensure_nonzero_denominator(den, s)?;
+            Ok(num / den)
+        }
+        None => s
+            .trim()
+            .parse()
+            .map_err(|_| format!("不正な数値です: \"{s}\"")),
+    }
+}
+
+fn ensure_nonzero_denominator(den: f64, original: &str) -> Result<(), String> {
+    if den == 0.0 {
+        Err(format!("分母が0の分数です: \"{original}\""))
+    } else {
+        Ok(())
+    }
+}
 
 /// TOML形式の設定ファイルに対応する構造体。
 /// `f`, `c_1`, `c_2`, `l` はリストで指定し、その全組み合わせがシミュレーションされる。
@@ -13,15 +64,17 @@ pub struct Config {
     pub time: f64,
     /// 壁のばね定数 K
     pub k: f64,
-    /// アンサンブルサイズ(1ケースあたりの粒子数)
+    /// アンサンブルサイズ
     pub ensemble_size: u32,
     /// 全ケースの結果をまとめて出力するフォルダ
     pub output_dir: PathBuf,
-    /// 一定外力 f(x方向)のリスト
+    /// 一定外力 f(x方向)のリスト(負の値も可)
     pub f: Vec<f64>,
-    /// 電場パラメータ C1 = βEp/l̃ のリスト
+    /// 電場パラメータ C1 = βEp/l̃ のリスト("1/3" のような分数表記も可)
+    #[serde(deserialize_with = "deserialize_frac_vec")]
     pub c_1: Vec<f64>,
-    /// 電場パラメータ C2 = ΔαE/p のリスト
+    /// 電場パラメータ C2 = ΔαE/p のリスト("1/3" のような分数表記も可)
+    #[serde(deserialize_with = "deserialize_frac_vec")]
     pub c_2: Vec<f64>,
     /// 棒の長さ l のリスト
     pub l: Vec<f64>,
@@ -65,18 +118,17 @@ impl Config {
         ] {
             ensure!(!list.is_empty(), "{name} には1つ以上の値を指定してください");
         }
-        // 上限は初期配置の計算(ω(x) - l/2 > 0)が退化しない範囲
         ensure!(
-            config.l.iter().all(|&l| l > 0.0 && l < 0.5),
-            "l は 0 < l < 0.5 の範囲で指定してください"
+            config.l.iter().all(|&l| l > 0.0),
+            "l は正の値を指定してください"
         );
 
         Ok(config)
     }
 
     /// 総シミュレーションステップ数 T/Δt
-    pub fn steps(&self) -> u64 {
-        (self.time / self.delta_t).round() as u64
+    pub fn steps(&self) -> usize {
+        (self.time / self.delta_t).round() as usize
     }
 
     /// パラメータリストの全組み合わせ(直積)をケースとして展開する
@@ -95,6 +147,17 @@ impl Config {
     }
 }
 
+/// フォルダ名用に、値を小数点以下6桁に丸めた上で末尾の余分な0や"."を取り除いて整形する
+fn format_param(value: f64) -> String {
+    let rounded = format!("{value:.6}");
+    let trimmed = rounded.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() || trimmed == "-" {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// 1回のシミュレーションに対応するパラメータの組
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Case {
@@ -105,9 +168,16 @@ pub struct Case {
 }
 
 impl Case {
-    /// このケースの結果を保存するフォルダ名(例: "f10_c1-2_c2-0.5_l0.05")
+    /// このケースの結果を保存するフォルダ名(例: "f-10_c1-2_c2-0.5_l-0.05")。
+    /// "1/3" のような分数指定で無限小数になった値も、小数点以下6桁に丸めて短く表示する。
     pub fn dir_name(&self) -> String {
-        format!("f{}_c1-{}_c2-{}_l{}", self.f, self.c_1, self.c_2, self.l)
+        format!(
+            "f-{}_c1-{}_c2-{}_l-{}",
+            format_param(self.f),
+            format_param(self.c_1),
+            format_param(self.c_2),
+            format_param(self.l)
+        )
     }
 
     /// パラメータの組から再現性のある乱数シードを導出する(FNV-1aハッシュ)。
@@ -124,5 +194,39 @@ impl Case {
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
         hash
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_fraction_and_negative_values() {
+        let text = r#"
+delta_t = 2e-7
+time = 10.0
+k = 1.5e6
+ensemble_size = 100
+output_dir = "data/"
+f = [10.0, -5.0]
+c_1 = ["1/3"]
+c_2 = [0.0]
+l = [0.04]
+"#;
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(config.f, vec![10.0, -5.0]);
+        assert_eq!(config.c_1, vec![1.0 / 3.0]);
+    }
+
+    #[test]
+    fn dir_name_stays_short_for_repeating_decimals() {
+        let case = Case {
+            f: 10.0,
+            c_1: 1.0 / 3.0,
+            c_2: -1.0 / 3.0,
+            l: 0.04,
+        };
+        assert_eq!(case.dir_name(), "f-10_c1-0.333333_c2--0.333333_l-0.04");
     }
 }

@@ -119,7 +119,8 @@ impl<R: Rng> Particle<R> {
 
         // 電場が電気双極子に及ぼすトルク: 2 C1 cosΦ (1 + C2 sinΦ)
         let torque = 2.0 * c_1 * c * (1.0 + c_2 * s);
-        // n × (f+ − f−)。n = (cosΦ, sinΦ) との2次元外積は (-sinΦ, cosΦ) との内積に等しい
+        // n × (f+ − f−)
+        // n = (cosΦ, sinΦ) との2次元外積は (-sinΦ, cosΦ) との内積に等しい
         let cross = (f_plus - f_minus).dot(&Vector2::new(-s, c));
 
         self.state.position += (Vector2::new(force_x, 0.0) + 0.5 * (f_plus + f_minus)) * delta_t
@@ -200,7 +201,7 @@ mod tests {
         let point = Point2::new(0.3, omega(0.3) + 0.01); // 上壁を少し越えた点
         let foot = perpendicular_foot::<Ceiling>(&point);
         let g = (foot.x - point.x) + omega_derivative(foot.x) * (omega(foot.x) - point.y);
-        assert!(g.abs() < 1e-8, "g(x*) = {g}");
+        assert!(g.abs() < 1e-10, "g(x*) = {g}");
     }
 
     /// 反発力がめり込みを解消する向き(壁の内側向き)であること

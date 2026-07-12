@@ -59,16 +59,16 @@ struct SimApp {
     particle: Particle<SmallRng>, // シミュレーション本体
     initial_state: State,         // 初期状態(ゴースト表示と情報表示に使う)
     seed: u64,                    // GUIで編集中のシード値(Resetで反映)
-    total_steps: u64,             // 総ステップ数 T/Δt
-    current_step: u64,            // 現在のステップ数
-    steps_per_frame: u64,         // 1フレームに進めるステップ数
+    total_steps: usize,           // 総ステップ数 T/Δt
+    current_step: usize,          // 現在のステップ数
+    steps_per_frame: usize,       // 1フレームに進めるステップ数
     running: bool,                // アニメーションが進行中かどうか
-    camera_x: f64,                // カメラ中心の x 座標(平滑化済み)
+    camera_x: f64,                // カメラ中心の x 座標
     trail: Vec<Point2<f64>>,      // 重心の軌跡(ワールド座標)
 }
 
 impl SimApp {
-    fn new(seed: u64, params: ModelParams, total_steps: u64) -> Self {
+    fn new(seed: u64, params: ModelParams, total_steps: usize) -> Self {
         let particle = Particle::new(SmallRng::seed_from_u64(seed), params);
         let initial_state = particle.state();
         Self {
@@ -77,7 +77,7 @@ impl SimApp {
             seed,
             total_steps,
             current_step: 0,
-            steps_per_frame: 5_000,
+            steps_per_frame: 1_000,
             running: true,
             camera_x: initial_state.position.x,
             trail: vec![initial_state.position],
@@ -124,7 +124,7 @@ impl eframe::App for SimApp {
             let n = self
                 .steps_per_frame
                 .min(self.total_steps - self.current_step);
-            self.particle.advance(n as usize);
+            self.particle.advance(n);
             self.current_step += n;
             self.trail.push(self.particle.state().position);
             if self.current_step >= self.total_steps {
@@ -155,9 +155,9 @@ impl eframe::App for SimApp {
                 let params = &mut self.particle.params;
                 ui.label("f:");
                 ui.add(DragValue::new(&mut params.force_x).speed(0.5));
-                ui.label("C1:");
+                ui.label("C1(=βEp/l):");
                 ui.add(DragValue::new(&mut params.c_1).speed(0.1));
-                ui.label("C2:");
+                ui.label("C2(=ΔαE/p):");
                 ui.add(DragValue::new(&mut params.c_2).speed(0.01));
                 ui.separator();
 

@@ -205,7 +205,7 @@ mod backend {
                 workers.push(std::thread::spawn(move || -> Result<()> {
                     let stream = ctx.new_stream()?;
                     let func = module.load_function("simulate")?;
-                    // 出力バッファ: [Σ Δx, Σ (Δx)²]
+                    // 出力用バッファ: [Σ Δx, Σ (Δx)²]
                     let mut out = stream.alloc_zeros::<f64>(2)?;
 
                     loop {
