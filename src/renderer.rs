@@ -1,7 +1,7 @@
 //! シミュレーションのアニメーション表示。
 //!
-//! 1粒子のブラウン運動をリアルタイムに描画する。シード値・外力 f・C1・C2 は
-//! GUIから変更でき、f/C1/C2 は実行中の粒子に即座に反映される(シードはReset時に反映)。
+//! 1粒子のブラウン運動をリアルタイムに描画する。シード値・外力 f・C1・C2・棒の長さ l は
+//! GUIから変更でき、f/C1/C2/l は実行中の粒子に即座に反映される(シードはReset時に反映)。
 //! カメラは x 方向にのみ粒子を追いかける。ブラウン運動の細かな揺れに画面が
 //! 追従するとガタつくため、デッドゾーン+一次遅れ(指数平滑)で滑らかに追従させる。
 //!
@@ -18,7 +18,8 @@ use nalgebra::Point2;
 use rand::{SeedableRng, rngs::SmallRng};
 use std::f64::consts::TAU;
 
-/// 表示する x 方向の範囲(カメラ中心 ± この値)
+/// 表示を保証する x 方向の最小範囲(カメラ中心 ± この値)。ズーム倍率の決定に使い、
+/// ウィンドウが横長の場合は実際の可視範囲はこれより広くなる
 const VIEW_HALF_WIDTH: f64 = 1.5;
 /// 表示する y 方向の範囲(チャネルの最大幅 max ω ≈ 2.221 を覆う)
 const Y_MAX: f64 = 2.3;
@@ -106,13 +107,18 @@ impl SimApp {
         }
     }
 
-    /// ワールド座標から画面座標への変換を表すクロージャを作る(y軸は上向きが正)
-    fn world_to_screen(&self, rect: Rect) -> impl Fn(Point2<f64>) -> Pos2 {
+    /// ワールド座標から画面座標への変換を表すクロージャ(y軸は上向きが正)と、
+    /// 画面の左右端まで届く x 方向の可視半幅(ワールド座標)を返す
+    fn world_to_screen(&self, rect: Rect) -> (impl Fn(Point2<f64>) -> Pos2, f64) {
         let scale = (rect.width() / (2.0 * VIEW_HALF_WIDTH) as f32)
             .min(rect.height() / (2.0 * Y_MAX) as f32);
+        let visible_half_width = (0.5 * rect.width() / scale) as f64;
         let center = rect.center();
         let camera_x = self.camera_x;
-        move |p: Point2<f64>| center + egui::vec2((p.x - camera_x) as f32, -p.y as f32) * scale
+        (
+            move |p: Point2<f64>| center + egui::vec2((p.x - camera_x) as f32, -p.y as f32) * scale,
+            visible_half_width,
+        )
     }
 }
 
@@ -169,6 +175,12 @@ impl eframe::App for SimApp {
                 ui.add(DragValue::new(&mut params.c_1).speed(0.1));
                 ui.label("C2(=ΔαE/p):");
                 ui.add(DragValue::new(&mut params.c_2).speed(0.01));
+                ui.label("l:");
+                ui.add(
+                    DragValue::new(&mut params.length)
+                        .speed(0.005)
+                        .range(0.001..=1.0), // 0除算を防ぐため正の値に制限
+                );
                 ui.separator();
 
                 ui.add(
@@ -208,13 +220,14 @@ impl eframe::App for SimApp {
         CentralPanel::default().show(ui, |ui| {
             let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::empty());
             let painter = ui.painter_at(rect);
-            let to_screen = self.world_to_screen(rect);
+            let (to_screen, visible_half_width) = self.world_to_screen(rect);
 
-            // チャネル境界の描画(カメラが動くため毎フレーム可視範囲を計算する)
-            let samples = (2.0 * VIEW_HALF_WIDTH / BOUNDARY_SAMPLING_STRIDE) as usize;
+            // チャネル境界の描画(画面の左右いっぱいまで。カメラが動くため毎フレーム可視範囲を計算する)
+            let samples = (2.0 * visible_half_width / BOUNDARY_SAMPLING_STRIDE) as usize;
             let (upper, lower): (Vec<Pos2>, Vec<Pos2>) = (0..=samples)
                 .map(|i| {
-                    let x = self.camera_x - VIEW_HALF_WIDTH + i as f64 * BOUNDARY_SAMPLING_STRIDE;
+                    let x =
+                        self.camera_x - visible_half_width + i as f64 * BOUNDARY_SAMPLING_STRIDE;
                     let y = omega(x);
                     (to_screen(Point2::new(x, y)), to_screen(Point2::new(x, -y)))
                 })
@@ -242,13 +255,12 @@ impl eframe::App for SimApp {
                 Color32::from_rgba_unmultiplied(220, 220, 220, 120),
             );
 
-            // 現在の粒子の描画(棒の + 端を明るい色にして向きが分かるようにする)
+            // 現在の粒子の描画(棒と重心)
             let (p_plus, p_minus) = self.particle.endpoints();
             painter.line_segment(
                 [to_screen(p_plus), to_screen(p_minus)],
                 Stroke::new(3.0, Color32::from_rgb(230, 90, 60)),
             );
-            painter.circle_filled(to_screen(p_plus), 3.0, Color32::from_rgb(255, 200, 80));
             painter.circle_filled(
                 to_screen(self.particle.state().position),
                 1.5,
