@@ -50,9 +50,9 @@
   "containerUser": "tutu",
   "postCreateCommand": {
     "fetch-deps": "cargo fetch",
-    "install-ax": "curl -fsSL https://ax.yusuke.run/install | AX_INSTALL_DIR=/usr/bin sh",
-    "install-ast-grep": "cargo install ast-grep --locked",
-    "install-sem": "cargo install --git https://github.com/Ataraxy-Labs/sem sem-cli"
+    "install-ax": "curl -fsSL https://ax.yusuke.run/install | sudo env AX_INSTALL_DIR=/usr/bin sh",
+    "install-ast-grep": "command -v ast-grep >/dev/null || cargo install ast-grep --locked",
+    "install-sem": "command -v sem >/dev/null || cargo install --git https://github.com/Ataraxy-Labs/sem sem-cli"
   },
   "containerEnv": {
     "CARGO_TERM_COLOR": "always",
