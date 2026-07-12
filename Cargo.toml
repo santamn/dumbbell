@@ -20,7 +20,7 @@ cudarc = { version = "0.19", features = [
 ], optional = true }
 
 [features]
-default = ["gpu"]
+default = []
 gpu = ["dep:cudarc"]
 
 [profile.release]

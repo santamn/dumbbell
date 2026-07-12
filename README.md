@@ -39,8 +39,8 @@ l   = [0.04, 0.08]   # 棒の長さ
 ### 2. シミュレーションを実行する
 
 ```sh
-cargo run --release                          # ./config.toml を使って全ケースを実行
-cargo run --release -- --config sweep.toml   # 設定ファイルを指定して実行
+cargo run --release --features gpu                          # ./config.toml を使って全ケースを実行
+cargo run --release --features gpu -- --config sweep.toml   # 設定ファイルを指定して実行
 ```
 
 ケースは全GPUのワーカーに自動的に振り分けられ、終わったものから順に結果が書き出されます。
@@ -75,15 +75,15 @@ cargo run --release -- animate
 
 1粒子の運動をリアルタイムに描画します。初期パラメータには設定ファイルの各リストの先頭値が使われます。
 
-- **seed / f / C1 / C2 はGUIで変更可能**: f, C1, C2 は実行中の粒子に即座に反映され、seed は Reset ボタンを押したときに反映されます
+- **seed / l / f / C1 / C2 はGUIで変更可能**: l, f, C1, C2 は実行中の粒子に即座に反映され、seed は Reset ボタンを押したときに反映されます
 - 初期状態(灰色の棒)と現在の状態(赤い棒)が同時に表示されます
 
 ## CPU版としてのビルド
 
-GPUがないマシンでは、同じ物理モデルのCPU実装(rayon並列)で動かせます。小規模な動作確認・検証用です。
+GPUがないマシンでは、同じ物理モデルのCPU実装(rayon並列)で動かせます。小規模な動作確認・検証用です。`gpu` フィーチャーを付けずにビルドするとCPU版になります。
 
 ```sh
-cargo run --release --no-default-features
+cargo run --release
 ```
 
 ## プロジェクト構成
