@@ -12,6 +12,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
 /// 1ケースのシミュレーションから得られる統計量
 #[derive(Debug, Clone, Copy)]
@@ -41,7 +42,15 @@ impl CaseStatistics {
 
 /// 設定された全ケースを実行し、ケースごとのフォルダと全体のまとめファイルに結果を書き出す
 pub fn run_all(config: &Config, config_path: &Path) -> Result<()> {
+    let total_start = Instant::now();
     let cases = config.cases();
+
+    // 前回の実行結果を誤って上書き・混在させないよう、出力フォルダが既に存在する場合は中止する
+    anyhow::ensure!(
+        !config.output_dir.exists(),
+        "出力フォルダ {} は既に存在します。別のフォルダを指定するか、削除してから実行してください",
+        config.output_dir.display()
+    );
     std::fs::create_dir_all(&config.output_dir).with_context(|| {
         format!(
             "出力フォルダ {} を作成できません",
@@ -63,12 +72,12 @@ pub fn run_all(config: &Config, config_path: &Path) -> Result<()> {
             .progress_chars("=>-"),
     );
 
-    // ワーカーが計算した (ケース番号, モーメント) を受け取るチャネル
+    // ワーカーが計算した (ケース番号, モーメント, そのケースの所要時間) を受け取るチャネル
     let (tx, rx) = std::sync::mpsc::channel();
     let workers = backend::spawn_workers(config, &cases, tx)?;
 
     // 全ワーカーが送信側を手放すまで、完了したケースから順に結果を書き出す
-    for (index, mean_disp, mean_sq_disp) in rx {
+    for (index, mean_disp, mean_sq_disp, elapsed) in rx {
         let case = cases[index];
         let stats = CaseStatistics::from_moments(mean_disp, mean_sq_disp, config.time, case.f);
         write_case_result(config, &case, &stats)?;
@@ -86,6 +95,11 @@ pub fn run_all(config: &Config, config_path: &Path) -> Result<()> {
         )?;
         summary.flush()?;
 
+        progress.println(format!(
+            "完了: {} ({:.1}秒)",
+            case.dir_name(),
+            elapsed.as_secs_f64()
+        ));
         progress.set_message(format!("完了: {}", case.dir_name()));
         progress.inc(1);
     }
@@ -95,9 +109,11 @@ pub fn run_all(config: &Config, config_path: &Path) -> Result<()> {
         worker.join().expect("ワーカースレッドが異常終了")?;
     }
 
+    let total_elapsed = total_start.elapsed();
     progress.finish_with_message(format!(
-        "全{}ケース完了 → {}",
+        "全{}ケース完了 ({:.1}秒) → {}",
         cases.len(),
+        total_elapsed.as_secs_f64(),
         config.output_dir.display()
     ));
     Ok(())
@@ -176,7 +192,7 @@ mod backend {
     pub fn spawn_workers(
         config: &Config,
         cases: &[Case],
-        results: Sender<(usize, f64, f64)>,
+        results: Sender<(usize, f64, f64, Duration)>,
     ) -> Result<Vec<JoinHandle<Result<()>>>> {
         let gpu_ids = match &config.gpu.ids {
             Some(ids) => ids.clone(),
@@ -215,6 +231,7 @@ mod backend {
                             return Ok(());
                         };
 
+                        let case_start = Instant::now();
                         stream.memset_zeros(&mut out)?;
                         unsafe {
                             stream
@@ -239,7 +256,9 @@ mod backend {
 
                         let sums = stream.clone_dtoh(&out)?;
                         let n = config.ensemble_size as f64;
-                        results.send((index, sums[0] / n, sums[1] / n)).ok();
+                        results
+                            .send((index, sums[0] / n, sums[1] / n, case_start.elapsed()))
+                            .ok();
                     }
                 }));
             }
@@ -262,7 +281,7 @@ mod backend {
     pub fn spawn_workers(
         config: &Config,
         cases: &[Case],
-        results: Sender<(usize, f64, f64)>,
+        results: Sender<(usize, f64, f64, Duration)>,
     ) -> Result<Vec<JoinHandle<Result<()>>>> {
         let config = config.clone();
         let cases = cases.to_vec();
@@ -270,6 +289,7 @@ mod backend {
         Ok(vec![std::thread::spawn(move || -> Result<()> {
             let steps = config.steps() as usize;
             for (index, case) in cases.iter().enumerate() {
+                let case_start = Instant::now();
                 let params = ModelParams {
                     delta_t: config.delta_t,
                     spring_k: config.k,
@@ -293,7 +313,9 @@ mod backend {
                     .reduce(|| (0.0, 0.0), |(a, aa), (b, bb)| (a + b, aa + bb));
 
                 let n = config.ensemble_size as f64;
-                results.send((index, sum / n, sq_sum / n)).ok();
+                results
+                    .send((index, sum / n, sq_sum / n, case_start.elapsed()))
+                    .ok();
             }
             Ok(())
         })])
