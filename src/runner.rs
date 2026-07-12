@@ -243,7 +243,7 @@ mod backend {
         let cases = cases.to_vec();
 
         Ok(vec![std::thread::spawn(move || -> Result<()> {
-            let steps = config.steps() as usize;
+            let steps = config.steps();
             for (index, case) in cases.iter().enumerate() {
                 let case_start = Instant::now();
                 let params = ModelParams {
