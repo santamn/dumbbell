@@ -28,34 +28,38 @@ The architecture of the machine used for GPU-based computation is described in [
 - The physical model of particles in the animation must always match the physical model of particles in the simulation
   - Whenever you resolve a semantic difference between the two physical models to keep them in sync, you must explicitly declare that you have done so
 
-## Command line tools
+# Supported Command-Line Tools & Usage Guidelines
 
-You can use the following command-line tools to perform searches, edits, and code analysis with AI agents more efficiently and quickly.
+You have access to the following specialized command-line tools. To minimize token consumption, reduce execution latency, and ensure semantic accuracy, you **must prioritize** these tools over standard Unix commands (like `grep`, `find`, or `git diff`) according to the guidelines below.
 
-- ripgrep (`rg`): Fast text/regex search across the repo. Prefer this over `grep -r`. Respects .gitignore by default. 
-  - Examples:
+- **ripgrep (`rg`)**: Your primary tool for fast text/regex search across the repository.
+  - *When to use:* Searching for strings, patterns, or TODOs. Prefer this over `grep -r`. Respects `.gitignore` by default.
+  - *Examples:*
     - `rg 'pattern'`
     - `rg -n --glob '*.ts' 'foo'`
-    - `rg -l 'TODO'` (files only)
-    - `rg -F 'literal string'` (no regex)
-- fd (`fdfind`): Fast file/directory finder. Prefer this over `find`. Respects .gitignore, case-insensitive smart matching. 
-  - Examples: 
+    - `rg -l 'TODO'` (list files only)
+    - `rg -F 'literal string'` (disables regex)
+
+- **fd (`fdfind`)**: Your primary tool for locating files or directories.
+  - *When to use:* Finding specific files by name or extension. Prefer this over `find`. Respects `.gitignore` and uses smart case-matching.
+  - *Examples:*
     - `fdfind config`
     - `fdfind -e py` (by extension)
     - `fdfind -t d src` (directories only)
-    - `fdfind -H` (include hidden)
-- ax: Local HTTP and HTML I/O for coding agents. One command instead of curl + throwaway Python. Run `ax agent-context` to learn it — use it instead of throwaway scripts.
-- ast-grep (`sg`): Structural (AST-based) code search and rewrite. Use when text regex is too fragile — matching syntax, not strings. 
-  - Examples: 
-    - `sg -p 'console.log($ARG)' -l ts`: search
-    - `sg -p 'foo($A)' -r 'bar($A)' -U`: rewrite in place. `$VAR` matches one node, `$$$` matches many.
-- sem: Semantic version control on top of git. Parses code with tree-sitter and diffs, blames, and analyzes impact at the entity level (functions, classes, methods, structs) instead of lines. Prefer this over `git diff` / `git blame` when you care about *which entities* changed rather than which lines. Works in any git repo with no setup.
-  - Examples:
-    - `sem diff`
-    - `sem diff --staged`
-    - `sem diff --format json`
-    - What breaks if an entity changes (dependencies & dependents): `sem impact simulate_step`
-    - `sem blame src/simulation.rs`
-    - `sem log simulate_step`
-    - `sem entities src/`
-    - Token-budgeted context (entity + deps + dependents) for LLMs: `sem context simulate_step --budget 4000`
+    - `fdfind -H` (includes hidden files)
+
+- **ax**: A local HTTP and HTML I/O utility optimized for AI agents.
+  - *When to use:* Performing local web/API requests. Use this instead of writing throwaway curl commands or Python scripts. Run `ax agent-context` first to learn its capabilities.
+
+- **ast-grep (`sg`)**: AST-based structural code search and rewriting.
+  - *When to use:* When regular expression search is too fragile (e.g., finding syntax patterns regardless of whitespace or formatting).
+  - *Examples:*
+    - `sg -p 'console.log($ARG)' -l ts` (structural search)
+    - `sg -p 'foo($A)' -r 'bar($A)' -U` (in-place AST rewrite)
+
+- **sem**: Entity-level semantic version control.
+  - *When to use:* Analyzing impact, diffs, or git history at the code-entity level (functions, classes, structs) rather than raw lines. Prefer this over `git diff` or `git blame` when structural impact matters.
+  - *Examples:*
+    - `sem diff` / `sem diff --staged`
+    - `sem impact [entity_name]` (simulate impact and dependencies)
+    - `sem context [entity_name] --budget 4000` (retrieve token-budgeted context)
