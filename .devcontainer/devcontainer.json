@@ -44,7 +44,7 @@
       "version": "1.96.0"
     },
     "ghcr.io/devcontainers-extra/features/apt-packages:1": {
-      "packages": "build-essential, clang, mold, ripgrep, fd-find, tmux, pkg-config, libssl-dev"
+      "packages": "build-essential, clang, mold, ripgrep, fd-find, pkg-config, libssl-dev"
     }
   },
   "runArgs": ["--device=nvidia.com/gpu=all"],

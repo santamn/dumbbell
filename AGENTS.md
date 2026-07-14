@@ -4,6 +4,21 @@
 
 This dumbbell is a Brownian motion simulation program implemented in Rust and CUDA.
 
+## Project Structure
+
+```
+src/
+├── main.rs         # CLI (run / animate subcommands)
+├── config.rs       # Loading TOML configuration and expanding it into parameter combinations
+├── simulation.rs   # CPU implementation of the physical model (used for animation and the CPU version)
+├── simulation.cu   # GPU implementation of the physical model (CUDA kernels)
+├── runner.rs       # Running all cases and writing out results (GPU/CPU backends)
+└── renderer.rs     # Animation display (egui/eframe)
+docs/
+├── model.md        # Derivation and formulation of the physical model
+└── architecture.md # Hardware configuration of the execution machine
+```
+
 ## Physical Model of the Simulation
 
 In the simulation, particles undergoing Brownian motion are treated as structures in which two points are connected by a rigid rod (i.e., dumbbell-shaped particles). The detailed physical model is described in [model.md](docs/model.md). Refer to it as needed.
