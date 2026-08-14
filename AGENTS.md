@@ -32,7 +32,7 @@ In the simulation, particles undergoing Brownian motion are treated as structure
 
 The architecture of the machine used for GPU-based computation is described in [architecture.md](docs/architecture.md). Understanding the machine architecture is important when performing optimizations and similar work.
 
-## Code Quality Practices
+## General Coding Guide
 
 - Please do not worry about backward compatibility until I provide further instructions.
   - Prefer to make data immutable.
@@ -50,6 +50,8 @@ The architecture of the machine used for GPU-based computation is described in [
   - In particular, after making substantial additions or changes to the codebase, refactor the entire codebase in light of those changes
 
 ## Command-line tools
+
+### Installed tools
 
 The following are installed in this environment. Prefer them over the standard Unix equivalents.
 
