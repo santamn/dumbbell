@@ -43,6 +43,7 @@ The architecture of the machine used for GPU-based computation is described in [
     - Actions: Depend on how many times or when it is run. Also called functions with side-effects, side-effecting functions, impure functions. Examples: Send an email, read from a database, including I/O operations.
     - Calculations: Computations from input to output. Also called pure functions, mathematical functions. Examples: Find the maximum number, check if an email address is valid.
     - Data: Facts about events. Examples: The email address a user gave us, the dollar amount read from a bank's API.
+- Always attach comments **in Japanese** explaining the meaning of functions, structs, and any other semantically cohesive pieces of code
 
 ## Command-line tools
 
