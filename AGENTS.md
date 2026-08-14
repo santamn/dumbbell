@@ -34,20 +34,15 @@ The architecture of the machine used for GPU-based computation is described in [
 
 ## General Coding Guide
 
-- Please do not worry about backward compatibility until I provide further instructions.
+- Do not preserve backward compatibility. Remove obsolete paths instead of adding compatibility layers, fallbacks, or migrations.
+- Grow the system in layers. Start from the smallest version that works end to end, and add each new capability on top of a product that already works. Never trade a working product for unfinished complexity.
+- Keep components modular and concerns clearly separated.
+- Follow functional programming style.
   - Prefer to make data immutable.
   - Specify three components: Actions, Calculation, Data (This principle is written in the book "Grokking Simplicity"). Specifically, carefully isolate Actions.
     - Actions: Depend on how many times or when it is run. Also called functions with side-effects, side-effecting functions, impure functions. Examples: Send an email, read from a database, including I/O operations.
     - Calculations: Computations from input to output. Also called pure functions, mathematical functions. Examples: Find the maximum number, check if an email address is valid.
     - Data: Facts about events. Examples: The email address a user gave us, the dollar amount read from a bank's API.
-- Keep complexity under control through appropriate abstraction, concretization, and use of libraries
-  - Remove code and libraries that are no longer needed
-- When using a library, consult its documentation and use it correctly
-  - Refer to the documentation for how to specify library versions
-  - Unless the documentation instructs otherwise, use the latest stable version
-- Always attach comments **in Japanese** explaining the meaning of functions, structs, and any other semantically cohesive pieces of code
-- Refactor code following established best practices such as those in *The Art of Readable Code* to improve readability
-  - In particular, after making substantial additions or changes to the codebase, refactor the entire codebase in light of those changes
 
 ## Command-line tools
 
