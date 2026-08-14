@@ -1,22 +1,16 @@
 {
   "name": "dumbbell",
   "image": "nvidia/cuda:12.2.0-devel-ubuntu22.04",
+
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
   "workspaceFolder": "/workspace",
-  "shutdownAction": "none",
+
+  "shutdownAction": "stopContainer",
+
   "mounts": [
-    {
-      "source": "${localWorkspaceFolder}",
-      "target": "/workspace",
-      "type": "bind"
-    },
     {
       "source": "dumbbell-cargo-registry",
       "target": "/usr/local/cargo/registry",
-      "type": "volume"
-    },
-    {
-      "source": "dumbbell-cargo-bin",
-      "target": "/usr/local/cargo/bin",
       "type": "volume"
     },
     {
@@ -25,40 +19,47 @@
       "type": "volume"
     },
     {
-      "source": "dumbbell-target",
-      "target": "${containerWorkspaceFolder}/target",
+      "source": "dumbbell-cargo-tools",
+      "target": "/home/tutu/.cargo-tools",
       "type": "volume"
     },
     {
-      "source": "${env:SSH_AUTH_SOCK}",
-      "target": "/ssh-agent",
-      "type": "bind"
+      "source": "dumbbell-target",
+      "target": "/workspace/target",
+      "type": "volume"
     }
   ],
+
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {
-      "configureZshAsDefaultShell": "true",
+      "configureZshAsDefaultShell": true,
       "username": "tutu"
     },
-    "ghcr.io/devcontainers/features/rust:1": {
+    "ghcr.io/devcontainers/features/rust:1.5.1": {
       "version": "1.96.0"
     },
     "ghcr.io/devcontainers-extra/features/apt-packages:1": {
-      "packages": "build-essential, clang, mold, ripgrep, fd-find, pkg-config, libssl-dev"
+      "packages": "build-essential,clang,pkg-config,libssl-dev"
     }
   },
+
   "runArgs": ["--device=nvidia.com/gpu=all"],
+
   "containerUser": "tutu",
-  "postCreateCommand": {
-    "fetch-deps": "cargo fetch",
-    "install-ax": "curl -fsSL https://ax.yusuke.run/install | sudo env AX_INSTALL_DIR=/usr/bin sh",
-    "install-ast-grep": "command -v ast-grep >/dev/null || cargo install ast-grep --locked",
-    "install-sem": "command -v sem >/dev/null || cargo install --git https://github.com/Ataraxy-Labs/sem sem-cli"
-  },
+  "remoteUser": "tutu",
+  "updateRemoteUserUID": true,
+
   "containerEnv": {
     "CARGO_TERM_COLOR": "always",
-    "SSH_AUTH_SOCK": "/ssh-agent"
+    "CARGO_INSTALL_ROOT": "/home/tutu/.cargo-tools"
   },
+  "remoteEnv": {
+    "PATH": "/home/tutu/.cargo-tools/bin:${containerEnv:PATH}"
+  },
+
+  "onCreateCommand": "sudo mkdir -p /workspace/target /home/tutu/.cargo-tools && sudo chown -R tutu:tutu /workspace/target /home/tutu/.cargo-tools /usr/local/cargo/registry /usr/local/cargo/git",
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
   "customizations": {
     "vscode": {
       "extensions": [
@@ -70,7 +71,8 @@
         "anthropic.claude-code"
       ],
       "settings": {
-        "terminal.integrated.persistentSessionReviveProcess": "never"
+        "terminal.integrated.persistentSessionReviveProcess": "never",
+        "terminal.integrated.enablePersistentSessions": false
       }
     }
   }
