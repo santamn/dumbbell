@@ -56,8 +56,10 @@ The architecture of the machine used for GPU-based computation is described in [
 The following are installed in this environment. Prefer them over the standard Unix equivalents.
 
 - `ast-grep` — Syntax-aware code search and rewriting. Use when regex is too fragile. See the ast-grep skill for rule syntax.
-- `sem` — Entity-level diff, blame, and impact analysis (functions, classes). Use instead of `git diff` and `git blame`. See the sem skill for details.
 - `ax` — HTTP fetching and HTML extraction. Use instead of `curl` plus a throwaway parsing script. Run `ax agent-context` to learn it.
+- `fd` — File and directory search. Use instead of `find`.
+- `rg` (ripgrep) — Text and regex search. Use instead of `grep -r`.
+- `sem` — Entity-level diff, blame, and impact analysis (functions, classes). Use instead of `git diff` and `git blame`. See the sem skill for details.
 
 ### Rules that override your defaults
 

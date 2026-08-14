@@ -1,12 +1,9 @@
 {
   "name": "dumbbell",
   "image": "nvidia/cuda:12.2.0-devel-ubuntu22.04",
-
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
   "workspaceFolder": "/workspace",
-
   "shutdownAction": "stopContainer",
-
   "mounts": [
     {
       "source": "dumbbell-cargo-registry",
@@ -29,7 +26,6 @@
       "type": "volume"
     }
   ],
-
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {
       "configureZshAsDefaultShell": true,
@@ -42,13 +38,10 @@
       "packages": "build-essential,clang,pkg-config,libssl-dev"
     }
   },
-
   "runArgs": ["--device=nvidia.com/gpu=all"],
-
   "containerUser": "tutu",
   "remoteUser": "tutu",
   "updateRemoteUserUID": true,
-
   "containerEnv": {
     "CARGO_TERM_COLOR": "always",
     "CARGO_INSTALL_ROOT": "/home/tutu/.cargo-tools"
@@ -56,10 +49,8 @@
   "remoteEnv": {
     "PATH": "/home/tutu/.cargo-tools/bin:${containerEnv:PATH}"
   },
-
   "onCreateCommand": "sudo mkdir -p /workspace/target /home/tutu/.cargo-tools && sudo chown -R tutu:tutu /workspace/target /home/tutu/.cargo-tools /usr/local/cargo/registry /usr/local/cargo/git",
   "postCreateCommand": "bash .devcontainer/post-create.sh",
-
   "customizations": {
     "vscode": {
       "extensions": [
