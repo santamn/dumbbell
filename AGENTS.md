@@ -23,12 +23,23 @@ docs/
 
 In the simulation, particles undergoing Brownian motion are treated as structures in which two points are connected by a rigid rod (i.e., dumbbell-shaped particles). The detailed physical model is described in [model.md](docs/model.md). Refer to it as needed.
 
+## About Animation
+
+- The physical model of particles in the animation must always match the physical model of particles in the simulation
+  - Whenever you resolve a semantic difference between the two physical models to keep them in sync, you must explicitly declare that you have done so
+
 ## Computer Architecture
 
 The architecture of the machine used for GPU-based computation is described in [architecture.md](docs/architecture.md). Understanding the machine architecture is important when performing optimizations and similar work.
 
 ## Code Quality Practices
 
+- Please do not worry about backward compatibility until I provide further instructions.
+  - Prefer to make data immutable.
+  - Specify three components: Actions, Calculation, Data (This principle is written in the book "Grokking Simplicity"). Specifically, carefully isolate Actions.
+    - Actions: Depend on how many times or when it is run. Also called functions with side-effects, side-effecting functions, impure functions. Examples: Send an email, read from a database, including I/O operations.
+    - Calculations: Computations from input to output. Also called pure functions, mathematical functions. Examples: Find the maximum number, check if an email address is valid.
+    - Data: Facts about events. Examples: The email address a user gave us, the dollar amount read from a bank's API.
 - Keep complexity under control through appropriate abstraction, concretization, and use of libraries
   - Remove code and libraries that are no longer needed
 - When using a library, consult its documentation and use it correctly
@@ -38,43 +49,18 @@ The architecture of the machine used for GPU-based computation is described in [
 - Refactor code following established best practices such as those in *The Art of Readable Code* to improve readability
   - In particular, after making substantial additions or changes to the codebase, refactor the entire codebase in light of those changes
 
-## About Animation
+## Command-line tools
 
-- The physical model of particles in the animation must always match the physical model of particles in the simulation
-  - Whenever you resolve a semantic difference between the two physical models to keep them in sync, you must explicitly declare that you have done so
+The following are installed in this environment. Prefer them over the standard Unix equivalents.
 
-# Supported Command-Line Tools & Usage Guidelines
+- `ast-grep` — Syntax-aware code search and rewriting. Use when regex is too fragile. See the ast-grep skill for rule syntax.
+- `sem` — Entity-level diff, blame, and impact analysis (functions, classes). Use instead of `git diff` and `git blame`. See the sem skill for details.
+- `ax` — HTTP fetching and HTML extraction. Use instead of `curl` plus a throwaway parsing script. Run `ax agent-context` to learn it.
 
-You have access to the following specialized command-line tools. To minimize token consumption, reduce execution latency, and ensure semantic accuracy, you **must prioritize** these tools over standard Unix commands (like `grep`, `find`, or `git diff`) according to the guidelines below.
+### Rules that override your defaults
 
-- **ripgrep (`rg`)**: Your primary tool for fast text/regex search across the repository.
-  - *When to use:* Searching for strings, patterns, or TODOs. Prefer this over `grep -r`. Respects `.gitignore` by default.
-  - *Examples:*
-    - `rg 'pattern'`
-    - `rg -n --glob '*.ts' 'foo'`
-    - `rg -l 'TODO'` (list files only)
-    - `rg -F 'literal string'` (disables regex)
-
-- **fd (`fdfind`)**: Your primary tool for locating files or directories.
-  - *When to use:* Finding specific files by name or extension. Prefer this over `find`. Respects `.gitignore` and uses smart case-matching.
-  - *Examples:*
-    - `fdfind config`
-    - `fdfind -e py` (by extension)
-    - `fdfind -t d src` (directories only)
-    - `fdfind -H` (includes hidden files)
-
-- **ax**: A local HTTP and HTML I/O utility optimized for AI agents.
-  - *When to use:* Performing local web/API requests. Use this instead of writing throwaway curl commands or Python scripts. Run `ax agent-context` first to learn its capabilities.
-
-- **ast-grep (`sg`)**: AST-based structural code search and rewriting.
-  - *When to use:* When regular expression search is too fragile (e.g., finding syntax patterns regardless of whitespace or formatting).
-  - *Examples:*
-    - `sg -p 'console.log($ARG)' -l ts` (structural search)
-    - `sg -p 'foo($A)' -r 'bar($A)' -U` (in-place AST rewrite)
-
-- **sem**: Entity-level semantic version control.
-  - *When to use:* Analyzing impact, diffs, or git history at the code-entity level (functions, classes, structs) rather than raw lines. Prefer this over `git diff` or `git blame` when structural impact matters.
-  - *Examples:*
-    - `sem diff` / `sem diff --staged`
-    - `sem impact [entity_name]` (simulate impact and dependencies)
-    - `sem context [entity_name] --budget 4000` (retrieve token-budgeted context)
+- Before changing or removing a function signature, always check the blast radius with `sem impact`.
+- When reporting how much changed, do not count `+`/`-` lines from `git diff`. Use the entity counts from `sem diff`.
+- When an `ast-grep` pattern fails to match, do not guess at rewrites. Dump the parsed AST with `ast-grep run --lang <lang> --pattern '<pattern>' --debug-query=ast` (`--lang` is required), then fix the pattern.
+- Before reading a large source file in full, get its structure with `ast-grep outline <path>`.
+- When working with HTML or an API, reach for `ax` before writing a Python or Node script.

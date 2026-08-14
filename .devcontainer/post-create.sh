@@ -19,12 +19,12 @@ fi
 MOLD_URL=$(curl -s https://api.github.com/repos/rui314/mold/releases/latest | grep -oP '"browser_download_url": "\K(.*x86_64-linux\.tar\.gz)(?=")')
 
 if [ -n "$MOLD_URL" ]; then
-    curl -fsSL "$MOLD_URL" -o mold.tar.gz
-    # /usr/local 配下に展開 (bin, lib, man などが適切に配置されます)
-    sudo tar -C /usr/local --strip-components=1 -xzf mold.tar.gz
-    rm mold.tar.gz
+  curl -fsSL "$MOLD_URL" -o mold.tar.gz
+  # /usr/local 配下に展開 (bin, lib, man などが適切に配置されます)
+  sudo tar -C /usr/local --strip-components=1 -xzf mold.tar.gz
+  rm mold.tar.gz
 else
-    echo "Failed to fetch mold release URL."
+  echo "Failed to fetch mold release URL."
 fi
 
 sem setup
