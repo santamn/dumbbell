@@ -16,8 +16,8 @@
       "type": "volume"
     },
     {
-      "source": "dumbbell-cargo-tools",
-      "target": "/home/tutu/.cargo-tools",
+      "source": "dumbbell-tools",
+      "target": "/home/tutu/.local",
       "type": "volume"
     },
     {
@@ -44,12 +44,12 @@
   "updateRemoteUserUID": true,
   "containerEnv": {
     "CARGO_TERM_COLOR": "always",
-    "CARGO_INSTALL_ROOT": "/home/tutu/.cargo-tools"
+    "CARGO_INSTALL_ROOT": "/home/tutu/.local"
   },
   "remoteEnv": {
-    "PATH": "/home/tutu/.cargo-tools/bin:${containerEnv:PATH}"
+    "PATH": "/home/tutu/.local/bin:${containerEnv:PATH}"
   },
-  "onCreateCommand": "sudo mkdir -p /workspace/target /home/tutu/.cargo-tools && sudo chown -R tutu:tutu /workspace/target /home/tutu/.cargo-tools /usr/local/cargo/registry /usr/local/cargo/git",
+  "onCreateCommand": "sudo mkdir -p /workspace/target /home/tutu/.local/bin && sudo chown -R tutu:tutu /workspace/target /home/tutu/.local /usr/local/cargo/registry /usr/local/cargo/git",
   "postCreateCommand": "bash .devcontainer/post-create.sh",
   "customizations": {
     "vscode": {
