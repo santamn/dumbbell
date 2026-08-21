@@ -31,7 +31,10 @@
       "configureZshAsDefaultShell": true,
       "username": "tutu"
     },
-    "ghcr.io/devcontainers/features/rust:1.5.1": {
+    "ghcr.io/devcontainers/features/node:2": {
+      "version": "lts"
+    },
+    "ghcr.io/devcontainers/features/rust:1": {
       "version": "1.96.0"
     },
     "ghcr.io/devcontainers-extra/features/apt-packages:1": {

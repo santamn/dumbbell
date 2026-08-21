@@ -31,4 +31,12 @@ if ! command -v mold >/dev/null; then
   fi
 fi
 
+# --- node のシンボリックリンクを /usr/local/bin に ---
+if ! /bin/sh -c 'command -v node' >/dev/null 2>&1; then
+  for bin in node npm npx; do
+    path=$(command -v "$bin" || true)
+    [ -n "$path" ] && sudo ln -sf "$path" "/usr/local/bin/$bin"
+  done
+fi
+
 sem setup
