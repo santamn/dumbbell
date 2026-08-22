@@ -64,8 +64,11 @@ pub struct Config {
     pub time: f64,
     /// 壁のばね定数 K
     pub k: f64,
-    /// アンサンブルサイズ
+    /// アンサンブルサイズ(最終的に必要なサンプル数)
     pub ensemble_size: u32,
+    /// 既に計算済みのサンプル数。`current_sample_size..ensemble_size` の範囲だけが計算される。
+    /// サンプルを後から追加する際は、この値を前回の ensemble_size に書き換えて再実行する
+    pub current_sample_size: u32,
     /// 全ケースの結果をまとめて出力するフォルダ
     pub output_dir: PathBuf,
     /// 一定外力 f(x方向)のリスト(負の値も可)
@@ -110,6 +113,12 @@ impl Config {
             config.ensemble_size > 0,
             "ensemble_size は1以上にしてください"
         );
+        ensure!(
+            config.current_sample_size < config.ensemble_size,
+            "current_sample_size ({}) は ensemble_size ({}) より小さくしてください。追加するサンプルがありません",
+            config.current_sample_size,
+            config.ensemble_size
+        );
         for (name, list) in [
             ("f", &config.f),
             ("c_1", &config.c_1),
@@ -129,6 +138,13 @@ impl Config {
     /// 総シミュレーションステップ数 T/Δt
     pub fn steps(&self) -> usize {
         (self.time / self.delta_t).round() as usize
+    }
+
+    /// 今回計算するサンプル数(= ensemble_size - current_sample_size)。
+    /// load() で current_sample_size < ensemble_size を検証済みなので必ず1以上になる
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))] // CPUビルドでは範囲を直接使う
+    pub fn sample_count(&self) -> u32 {
+        self.ensemble_size - self.current_sample_size
     }
 
     /// パラメータリストの全組み合わせ(直積)をケースとして展開する
@@ -201,22 +217,47 @@ impl Case {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_fraction_and_negative_values() {
-        let text = r#"
+    /// テスト用の設定TOML(current_sample_size を差し替えられるようにしてある)
+    fn config_text(current_sample_size: u32) -> String {
+        format!(
+            r#"
 delta_t = 2e-7
 time = 10.0
 k = 1.5e6
 ensemble_size = 100
+current_sample_size = {current_sample_size}
 output_dir = "data/"
 f = [10.0, -5.0]
 c_1 = ["1/3"]
 c_2 = [0.0]
 l = [0.04]
-"#;
-        let config: Config = toml::from_str(text).unwrap();
+"#
+        )
+    }
+
+    #[test]
+    fn parses_fraction_and_negative_values() {
+        let config: Config = toml::from_str(&config_text(0)).unwrap();
         assert_eq!(config.f, vec![10.0, -5.0]);
         assert_eq!(config.c_1, vec![1.0 / 3.0]);
+        assert_eq!(config.sample_count(), 100);
+    }
+
+    /// 追記分のサンプルが残っていない設定は読み込み時に弾かれる
+    #[test]
+    fn rejects_exhausted_sample_range() {
+        let path = std::env::temp_dir().join("dumbbell_exhausted_config.toml");
+        std::fs::write(&path, config_text(100)).unwrap();
+        let err = Config::load(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        assert!(err.to_string().contains("current_sample_size"));
+    }
+
+    /// 未計算分だけが計算対象になる
+    #[test]
+    fn counts_only_remaining_samples() {
+        let config: Config = toml::from_str(&config_text(30)).unwrap();
+        assert_eq!(config.sample_count(), 70);
     }
 
     #[test]

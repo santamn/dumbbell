@@ -6,6 +6,7 @@ delta_t = 4e-7          # 時間刻み幅 Δt
 time = 100.0            # 総シミュレーション時間 T
 k = 1.5e6               # 壁のばね定数 K
 ensemble_size = 30000   # アンサンブルサイズ(1ケースあたりの粒子数)
+current_sample_size = 0 # 現在のサンプル数(ここから ensemble_size までが計算される)
 output_dir = "example/" # 全ケースの結果をまとめて出力するフォルダ
 
 # 以下のリストの全組み合わせ(直積)がシミュレーションされる

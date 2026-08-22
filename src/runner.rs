@@ -7,11 +7,42 @@
 use crate::config::{Case, Config};
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::fs::File;
+use std::collections::HashSet;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
+
+/// 1サンプル(1粒子)分の生データ。
+/// 集計は別スクリプトが行うため、プログラムはこの生データをCSVへ書き出す
+#[derive(Debug, Clone, Copy)]
+pub struct Sample {
+    /// サンプルID。0始まりの通し番号で、乱数ストリームと1:1に対応する。
+    /// 追記実行時は current_sample_size から続きの番号が振られる
+    pub id: u32,
+    /// 開始時のx座標
+    pub start_x: f64,
+    /// 終了時のx座標
+    pub end_x: f64,
+}
+
+impl Sample {
+    /// x方向の変位 Δx
+    fn displacement(&self) -> f64 {
+        self.end_x - self.start_x
+    }
+}
+
+/// 1ケース分の計算結果
+pub struct CaseResult {
+    /// ケース一覧の中での位置
+    pub index: usize,
+    /// 今回計算したサンプル(id の昇順)
+    pub samples: Vec<Sample>,
+    /// このケースの計算に要した実時間(進捗表示用)
+    pub elapsed: Duration,
+}
 
 /// 1ケースのシミュレーションから得られる統計量
 #[derive(Debug, Clone, Copy)]
@@ -37,19 +68,62 @@ impl CaseStatistics {
             mean_first_passage_time: 1.0 / mean_speed.abs(),
         }
     }
+
+    /// サンプル列から統計量を計算する。
+    /// 追記実行では「今回計算した分」だけが対象になるため、全サンプルを通した正しい集計は
+    /// CSVを読む別スクリプトが行う
+    fn from_samples(samples: &[Sample], time: f64, force: f64) -> Self {
+        let (sum, sq_sum) = samples.iter().fold((0.0, 0.0), |(sum, sq_sum), sample| {
+            let dx = sample.displacement();
+            (sum + dx, sq_sum + dx * dx)
+        });
+        let n = samples.len() as f64;
+        Self::from_moments(sum / n, sq_sum / n, time, force)
+    }
 }
 
-/// 設定された全ケースを実行し、まとめファイル(summary.dat)と設定のコピーを書き出す
+/// 追記モードでファイルを開く。新規作成したときだけヘッダ行を書き込む
+fn open_append(path: &Path, header: &str) -> Result<File> {
+    let is_new = !path.exists();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("{} を開けません", path.display()))?;
+    if is_new {
+        writeln!(file, "{header}")?;
+    }
+    Ok(file)
+}
+
+/// 2つのパスが同じ実体を指しているかを判定する。
+/// 存在しないパスは canonicalize に失敗するため、その場合は「別物」として扱う
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// 設定された全ケースを実行し、ケースごとのサンプルCSV・まとめファイル(summary.dat)・
+/// 設定のコピーを書き出す。既存の出力フォルダにはサンプルが追記される
 pub fn run_all(config: &Config, config_path: &Path) -> Result<()> {
     let total_start = Instant::now();
     let cases = config.cases();
 
-    // 前回の実行結果を誤って上書き・混在させないよう、出力フォルダが既に存在する場合は中止する
-    anyhow::ensure!(
-        !config.output_dir.exists(),
-        "出力フォルダ {} は既に存在します。別のフォルダを指定するか、削除してから実行してください",
-        config.output_dir.display()
-    );
+    // ケース名はサンプルCSVのファイル名になるため、衝突すると別ケースのサンプルが
+    // 同じファイルに混ざってしまう。label() は小数点以下6桁に丸めるので、
+    // パラメータの重複指定や、丸めた結果一致してしまう組をここで弾く
+    let mut labels = HashSet::new();
+    for case in &cases {
+        anyhow::ensure!(
+            labels.insert(case.label()),
+            "ケース名 {} が重複しています。f, c_1, c_2, l に同じ値、または小数点以下6桁で一致する値が含まれていないか確認してください",
+            case.label()
+        );
+    }
+
+    // サンプルを後から追加できるよう、出力フォルダは既に存在していてもよい
     std::fs::create_dir_all(&config.output_dir).with_context(|| {
         format!(
             "出力フォルダ {} を作成できません",
@@ -57,12 +131,19 @@ pub fn run_all(config: &Config, config_path: &Path) -> Result<()> {
         )
     })?;
 
-    // 再現性のため、使用した設定ファイルをそのまま出力フォルダへコピーする
-    std::fs::copy(config_path, config.output_dir.join("config.toml"))?;
+    // 再現性のため、使用した設定ファイルをそのまま出力フォルダへコピーする。
+    // 出力先の config.toml をそのまま指定して再実行された場合、コピーすると
+    // 自分自身を空にしてしまうためスキップする
+    let config_copy = config.output_dir.join("config.toml");
+    if !is_same_file(config_path, &config_copy) {
+        std::fs::copy(config_path, &config_copy)?;
+    }
 
     // 全ケースの結果をまとめるファイル(完了したケースから順に追記される)
-    let mut summary = File::create(config.output_dir.join("summary.dat"))?;
-    writeln!(summary, "# f c_1 c_2 l mean_disp mu d_eff mfpt")?;
+    let mut summary = open_append(
+        &config.output_dir.join("summary.dat"),
+        "# f c_1 c_2 l mean_disp mu d_eff mfpt",
+    )?;
 
     let progress = ProgressBar::new(cases.len() as u64).with_style(
         ProgressStyle::default_bar()
@@ -74,14 +155,39 @@ pub fn run_all(config: &Config, config_path: &Path) -> Result<()> {
     // かかるため、定期tickで実行開始直後から表示し、経過時間も更新され続けるようにする
     progress.enable_steady_tick(Duration::from_millis(500));
 
-    // ワーカーが計算した (ケース番号, モーメント, そのケースの所要時間) を受け取るチャネル
+    // ワーカーが計算したケース単位の結果を受け取るチャネル
     let (tx, rx) = std::sync::mpsc::channel();
     let workers = backend::spawn_workers(config, &cases, tx)?;
 
     // 全ワーカーが送信側を手放すまで、完了したケースから順に結果を書き出す
-    for (index, mean_disp, mean_sq_disp, elapsed) in rx {
+    for CaseResult {
+        index,
+        samples,
+        elapsed,
+    } in rx
+    {
         let case = cases[index];
-        let stats = CaseStatistics::from_moments(mean_disp, mean_sq_disp, config.time, case.f);
+
+        // サンプル単位の生データをケースごとのCSVへ追記する。
+        // 途中で中断してもここまでの結果が残るよう、ケースごとにflushする
+        let mut csv = open_append(
+            &config.output_dir.join(format!("{}.csv", case.label())),
+            "id,start_x,end_x,dx,time",
+        )?;
+        for sample in &samples {
+            writeln!(
+                csv,
+                "{},{},{},{},{}",
+                sample.id,
+                sample.start_x,
+                sample.end_x,
+                sample.displacement(),
+                config.time,
+            )?;
+        }
+        csv.flush()?;
+
+        let stats = CaseStatistics::from_samples(&samples, config.time, case.f);
         writeln!(
             summary,
             "{} {} {} {} {} {} {} {}",
@@ -148,7 +254,7 @@ mod backend {
     pub fn spawn_workers(
         config: &Config,
         cases: &[Case],
-        results: Sender<(usize, f64, f64, Duration)>,
+        results: Sender<CaseResult>,
     ) -> Result<Vec<JoinHandle<Result<()>>>> {
         let gpu_ids = match &config.gpu.ids {
             Some(ids) => ids.clone(),
@@ -177,8 +283,10 @@ mod backend {
                 workers.push(std::thread::spawn(move || -> Result<()> {
                     let stream = ctx.new_stream()?;
                     let func = module.load_function("simulate")?;
-                    // 出力用バッファ: [Σ Δx, Σ (Δx)²]
-                    let mut out = stream.alloc_zeros::<f64>(2)?;
+                    // 出力用バッファ: サンプルごとの [開始x, 終了x]。
+                    // 大きさはケースによらず一定なので一度だけ確保する
+                    let count = config.sample_count();
+                    let mut samples_dev = stream.alloc_zeros::<f64>(2 * count as usize)?;
 
                     loop {
                         // キューからケースを1つ取り出す(なくなったら終了)
@@ -187,33 +295,47 @@ mod backend {
                             return Ok(());
                         };
 
+                        // カーネルが全要素を書き込むため、ここでのゼロ初期化は不要
                         let case_start = Instant::now();
-                        stream.memset_zeros(&mut out)?;
                         unsafe {
                             stream
                                 .launch_builder(&func)
                                 .arg(&case.seed())
                                 .arg(&config.steps())
-                                .arg(&config.ensemble_size)
+                                .arg(&config.current_sample_size)
+                                .arg(&count)
                                 .arg(&config.delta_t)
                                 .arg(&config.k)
                                 .arg(&case.l)
                                 .arg(&case.f)
                                 .arg(&case.c_1)
                                 .arg(&case.c_2)
-                                .arg(&mut out)
+                                .arg(&mut samples_dev)
                                 .launch(LaunchConfig {
-                                    grid_dim: (config.ensemble_size.div_ceil(BLOCK_SIZE), 1, 1),
+                                    grid_dim: (count.div_ceil(BLOCK_SIZE), 1, 1),
                                     block_dim: (BLOCK_SIZE, 1, 1),
                                     shared_mem_bytes: 0,
                                 })?;
                         }
                         stream.synchronize()?;
 
-                        let sums = stream.clone_dtoh(&out)?;
-                        let n = config.ensemble_size as f64;
+                        // [開始x, 終了x] の並びを Sample へ組み替える(idは current_sample_size 始まり)
+                        let samples = stream
+                            .clone_dtoh(&samples_dev)?
+                            .chunks_exact(2)
+                            .enumerate()
+                            .map(|(i, pair)| Sample {
+                                id: config.current_sample_size + i as u32,
+                                start_x: pair[0],
+                                end_x: pair[1],
+                            })
+                            .collect();
                         results
-                            .send((index, sums[0] / n, sums[1] / n, case_start.elapsed()))
+                            .send(CaseResult {
+                                index,
+                                samples,
+                                elapsed: case_start.elapsed(),
+                            })
                             .ok();
                     }
                 }));
@@ -237,7 +359,7 @@ mod backend {
     pub fn spawn_workers(
         config: &Config,
         cases: &[Case],
-        results: Sender<(usize, f64, f64, Duration)>,
+        results: Sender<CaseResult>,
     ) -> Result<Vec<JoinHandle<Result<()>>>> {
         let config = config.clone();
         let cases = cases.to_vec();
@@ -255,22 +377,29 @@ mod backend {
                     c_2: case.c_2,
                 };
 
-                // 各粒子を独立にシミュレートし、変位の総和と二乗和を求める
-                let (sum, sq_sum) = (0..config.ensemble_size)
+                // 未計算のサンプルだけを独立にシミュレートする。
+                // サンプルIDがそのまま乱数シードに入るため、追記分は既存分と別の乱数列になる
+                let samples = (config.current_sample_size..config.ensemble_size)
                     .into_par_iter()
-                    .map(|i| {
-                        let rng = SmallRng::seed_from_u64(case.seed().wrapping_add(i as u64));
+                    .map(|id| {
+                        let rng = SmallRng::seed_from_u64(case.seed().wrapping_add(id as u64));
                         let mut particle = Particle::new(rng, params);
                         let start_x = particle.state().position.x;
                         particle.advance(steps);
-                        let dx = particle.state().position.x - start_x;
-                        (dx, dx * dx)
+                        Sample {
+                            id,
+                            start_x,
+                            end_x: particle.state().position.x,
+                        }
                     })
-                    .reduce(|| (0.0, 0.0), |(a, aa), (b, bb)| (a + b, aa + bb));
+                    .collect();
 
-                let n = config.ensemble_size as f64;
                 results
-                    .send((index, sum / n, sq_sum / n, case_start.elapsed()))
+                    .send(CaseResult {
+                        index,
+                        samples,
+                        elapsed: case_start.elapsed(),
+                    })
                     .ok();
             }
             Ok(())

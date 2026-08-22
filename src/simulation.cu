@@ -72,31 +72,36 @@ __device__ void repulsion(double spring_k, double px, double py, double *fx, dou
   *fy = spring_k * (sign * omega(x) - py);
 }
 
-// 1スレッドが1粒子を担当し、アンサンブル全体の変位の総和と二乗和を集計するカーネル。
-// 集計はカーネル全体で粒子あたり1回しか起きないため、単純な atomicAdd で十分。
+// 1スレッドが1粒子(1サンプル)を担当し、開始時と終了時のx座標を書き出すカーネル。
+// 集計は行わず生データを返す。ホスト側でCSVへ書き出す。
 extern "C" __global__ void simulate(
-    uint64_t seed,          // このケースの乱数シード
-    uint64_t steps,         // 総ステップ数 T/Δt
-    uint32_t ensemble_size, // 粒子数
-    double delta_t,         // 時間刻み幅 Δt
-    double spring_k,        // 壁のばね定数 K
-    double length,          // 棒の長さ l
-    double force_x,         // 一定外力 f(x方向)
-    double c_1,             // 電場パラメータ C1 = βEp/l̃
-    double c_2,             // 電場パラメータ C2 = ΔαE/p
-    double *out)            // [出力] out[0] = Σ Δx, out[1] = Σ (Δx)²
+    uint64_t seed,         // このケースの乱数シード
+    uint64_t steps,        // 総ステップ数 T/Δt
+    uint32_t start_index,  // 今回計算する最初のサンプルID(= current_sample_size)
+    uint32_t sample_count, // 今回計算するサンプル数
+    double delta_t,        // 時間刻み幅 Δt
+    double spring_k,       // 壁のばね定数 K
+    double length,         // 棒の長さ l
+    double force_x,        // 一定外力 f(x方向)
+    double c_1,            // 電場パラメータ C1 = βEp/l̃
+    double c_2,            // 電場パラメータ C2 = ΔαE/p
+    double *samples)       // [出力] サンプルごとに [開始x, 終了x] の2要素
 {
   uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= ensemble_size)
+  if (idx >= sample_count)
     return;
+
+  // 乱数列はサンプルIDで分離する。スレッド番号ではなくIDを使うことで、
+  // 後から追加したサンプルが既存のサンプルと同じ乱数列にならない
+  uint32_t id = start_index + idx;
 
   double noise_scale = sqrt(delta_t); // Wiener過程の増分の標準偏差 √Δt
   double inv_length = 1.0 / length;   // ループ内の除算を避けるための逆数
 
-  // スレッドごとに独立な乱数列を初期化(同じシードでも列番号 idx で分離される)。
+  // サンプルごとに独立な乱数列を初期化(同じシードでも列番号 id で分離される)。
   // XORWOW を採用(A100 での実測で Philox4x32-10 より約5%高スループット)
   curandState rng;
-  curand_init(seed, idx, 0, &rng);
+  curand_init(seed, id, 0, &rng);
 
   // 初期状態: x は1周期弱の範囲、y はチャネル内部、角度は一様分布
   double x = curand_uniform_double(&rng) * 0.8 - 0.1;
@@ -133,7 +138,6 @@ extern "C" __global__ void simulate(
     angle += ((torque + cross) * delta_t + 2.0 * xi_phi * noise_scale) * inv_length;
   }
 
-  double dx = x - start_x;
-  atomicAdd(&out[0], dx);
-  atomicAdd(&out[1], dx * dx);
+  samples[2 * idx] = start_x;
+  samples[2 * idx + 1] = x;
 }
