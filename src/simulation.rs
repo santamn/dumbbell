@@ -1,6 +1,6 @@
 //! ダンベル型粒子のブラウン運動モデル(CPU実装)。
 //!
-//! docs/model.md の無次元化された確率微分方程式を Euler–Maruyama 法で数値積分する。
+//! docs/model.md の無次元化された確率微分方程式を予測子・修正子法で数値積分する。
 //! GPU実装(simulation.cu)と同一の物理モデルであり、
 //! 物理モデルを変更する場合は必ず両者を同期させること。
 
@@ -94,38 +94,33 @@ impl<R: Rng> Particle<R> {
         self.state.endpoints(self.params.length)
     }
 
-    /// Euler–Maruyama 法で1ステップ時間発展させる(model.md の無次元化SDE)
+    /// 予測子・修正子法で1ステップ時間発展させる
     pub fn step(&mut self) {
-        let ModelParams {
-            delta_t,
-            spring_k,
-            length,
-            force_x,
-            c_1,
-            c_2,
-        } = self.params;
+        let ModelParams { delta_t, .. } = self.params;
         let noise_scale = delta_t.sqrt(); // Wiener過程の増分の標準偏差 √Δt
 
-        // Wiener過程の増分(標準正規乱数 × √Δt)
+        // Wiener過程の増分(標準正規乱数 × √Δt)。予測子・修正子で共通して使う
         let xi_x: f64 = self.rng.sample(StandardNormal);
         let xi_y: f64 = self.rng.sample(StandardNormal);
         let xi_phi: f64 = self.rng.sample(StandardNormal);
+        let noise_position = Vector2::new(xi_x, xi_y) * noise_scale;
+        let noise_angle = 2.0 * xi_phi * noise_scale / self.params.length;
 
-        let (s, c) = self.state.angle.sin_cos();
+        let anchor = self.state;
 
-        // 棒の両端に働く壁からの反発力
-        let (p_plus, p_minus) = self.endpoints();
-        let (f_plus, f_minus) = (repulsion(spring_k, &p_plus), repulsion(spring_k, &p_minus));
+        // 予測子: Euler–Maruyama 法の1ステップ
+        let (drift_position, drift_angle) = drift(&anchor, &self.params);
+        let predicted = State {
+            position: anchor.position + drift_position * delta_t + noise_position,
+            angle: anchor.angle + drift_angle * delta_t + noise_angle,
+        };
 
-        // 電場が電気双極子に及ぼすトルク: 2 C1 cosΦ (1 + C2 sinΦ)
-        let torque = 2.0 * c_1 * c * (1.0 + c_2 * s);
-        // n × (f+ − f−)
-        // n = (cosΦ, sinΦ) との2次元外積は (-sinΦ, cosΦ) との内積に等しい
-        let cross = (f_plus - f_minus).dot(&Vector2::new(-s, c));
-
-        self.state.position += (Vector2::new(force_x, 0.0) + 0.5 * (f_plus + f_minus)) * delta_t
-            + Vector2::new(xi_x, xi_y) * noise_scale;
-        self.state.angle += ((torque + cross) * delta_t + 2.0 * xi_phi * noise_scale) / length;
+        // 修正子: ドリフトを評価し直し、予測子に適用する
+        let (drift_position, drift_angle) = drift(&predicted, &self.params);
+        self.state = State {
+            position: anchor.position + drift_position * delta_t + noise_position,
+            angle: anchor.angle + drift_angle * delta_t + noise_angle,
+        };
     }
 
     /// nステップまとめて時間発展させる
@@ -134,6 +129,33 @@ impl<R: Rng> Particle<R> {
             self.step();
         }
     }
+}
+
+/// 指定した状態におけるドリフト項(重心・角度それぞれの力・トルクによる決定論的な変化率)を返す。
+/// 予測子・修正子法では始状態と予測状態の両方でこの関数を呼び、ドリフトを評価し直す
+fn drift(state: &State, params: &ModelParams) -> (Vector2<f64>, f64) {
+    let ModelParams {
+        spring_k,
+        length,
+        force_x,
+        c_1,
+        c_2,
+        ..
+    } = *params;
+    let (s, c) = state.angle.sin_cos();
+
+    // 棒の両端に働く壁からの反発力
+    let (p_plus, p_minus) = state.endpoints(length);
+    let (f_plus, f_minus) = (repulsion(spring_k, &p_plus), repulsion(spring_k, &p_minus));
+
+    // 電場が電気双極子に及ぼすトルク: 2 C1 cosΦ (1 + C2 sinΦ)
+    let torque = 2.0 * c_1 * c * (1.0 + c_2 * s);
+    // 外積 n × (f+ − f−)
+    let cross = (f_plus - f_minus).dot(&Vector2::new(-s, c));
+
+    let drift_position = Vector2::new(force_x, 0.0) + 0.5 * (f_plus + f_minus);
+    let drift_angle = (torque + cross) / length;
+    (drift_position, drift_angle)
 }
 
 /// 壁への沈み込みに対する反発力(ペナルティ法): f = K((x*, y*) - (px, py))

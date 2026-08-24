@@ -1,7 +1,7 @@
 // ============================================================================
 // ダンベル型粒子のブラウン運動シミュレーション(GPUカーネル)
 //
-// docs/model.md の無次元化された確率微分方程式を Euler–Maruyama 法で数値積分し、
+// docs/model.md の無次元化された確率微分方程式を予測子・修正子法で数値積分し、
 // アンサンブル全体の x 方向変位の総和と二乗和を求める。
 // CPU実装(simulation.rs)と同一の物理モデルであり、
 // 物理モデルを変更する場合は必ず両者を同期させること。
@@ -46,9 +46,9 @@ __device__ double perpendicular_foot_x(double px, double py, double sign)
     double w, w_p, w_pp;
     omega_with_derivatives(x, &w, &w_p, &w_pp);
 
-    double diff = sign * w - py;         // φ(x) - py
-    double phi_p = sign * w_p;           // φ'(x)
-    double phi_pp = sign * w_pp;         // φ''(x)
+    double diff = sign * w - py; // φ(x) - py
+    double phi_p = sign * w_p;   // φ'(x)
+    double phi_pp = sign * w_pp; // φ''(x)
 
     // ニュートン法の更新式: x ← x - g(x) / g'(x)
     x -= (x - px + phi_p * diff) / (1.0 + phi_p * phi_p + phi_pp * diff);
@@ -70,6 +70,34 @@ __device__ void repulsion(double spring_k, double px, double py, double *fx, dou
   double x = perpendicular_foot_x(px, py, sign);
   *fx = spring_k * (x - px);
   *fy = spring_k * (sign * omega(x) - py);
+}
+
+// 指定した状態におけるドリフト項(重心・角度それぞれの力・トルクによる決定論的な変化率)を求める。
+// 予測子・修正子法では1段階目と2段階目の両方でこの関数を呼び、ドリフトを評価し直す
+__device__ void drift(
+    double spring_k, double length, double force_x,        // 外力・壁のばね定数・棒の長さ
+    double c_1, double c_2,                                // 電場パラメータ C1 = βEp/l̃, C2 = ΔαE/p
+    double x, double y, double angle,                      // 現在の重心位置と角度
+    double *drift_x, double *drift_y, double *drift_angle) // [出力] ドリフト項の各成分
+{
+  double s, c;
+  sincos(angle, &s, &c);
+
+  // 棒の両端に働く壁からの反発力
+  double half_x = 0.5 * length * c;
+  double half_y = 0.5 * length * s;
+  double f_plus_x, f_plus_y, f_minus_x, f_minus_y;
+  repulsion(spring_k, x + half_x, y + half_y, &f_plus_x, &f_plus_y);
+  repulsion(spring_k, x - half_x, y - half_y, &f_minus_x, &f_minus_y);
+
+  // 電場が電気双極子に及ぼすトルク: 2 C1 cosΦ (1 + C2 sinΦ)
+  double torque = 2.0 * c_1 * c * (1.0 + c_2 * s);
+  // n × (f+ − f−)。n = (cosΦ, sinΦ) との2次元外積
+  double cross = c * (f_plus_y - f_minus_y) - s * (f_plus_x - f_minus_x);
+
+  *drift_x = force_x + 0.5 * (f_plus_x + f_minus_x);
+  *drift_y = 0.5 * (f_plus_y + f_minus_y);
+  *drift_angle = (torque + cross) / length;
 }
 
 // 1スレッドが1粒子(1サンプル)を担当し、開始時と終了時のx座標を書き出すカーネル。
@@ -113,29 +141,26 @@ extern "C" __global__ void simulate(
 
   for (uint64_t t = 0; t < steps; ++t)
   {
-    // Wiener過程の増分(標準正規乱数 × √Δt)
+    // Wiener過程の増分(標準正規乱数 × √Δt)。予測子・修正子で共通して使う
     double2 xi = curand_normal2_double(&rng);
     double xi_phi = curand_normal_double(&rng);
+    double noise_x = xi.x * noise_scale;
+    double noise_y = xi.y * noise_scale;
+    double noise_angle = 2.0 * xi_phi * noise_scale * inv_length;
 
-    double s, c;
-    sincos(angle, &s, &c);
+    // 予測子: 始状態でのドリフトによる Euler–Maruyama 法の1ステップ
+    double drift_x, drift_y, drift_angle;
+    drift(spring_k, length, force_x, c_1, c_2, x, y, angle, &drift_x, &drift_y, &drift_angle);
+    double predicted_x = x + drift_x * delta_t + noise_x;
+    double predicted_y = y + drift_y * delta_t + noise_y;
+    double predicted_angle = angle + drift_angle * delta_t + noise_angle;
 
-    // 棒の両端に働く壁からの反発力
-    double half_x = 0.5 * length * c;
-    double half_y = 0.5 * length * s;
-    double f_plus_x, f_plus_y, f_minus_x, f_minus_y;
-    repulsion(spring_k, x + half_x, y + half_y, &f_plus_x, &f_plus_y);
-    repulsion(spring_k, x - half_x, y - half_y, &f_minus_x, &f_minus_y);
-
-    // 電場が電気双極子に及ぼすトルク: 2 C1 cosΦ (1 + C2 sinΦ)
-    double torque = 2.0 * c_1 * c * (1.0 + c_2 * s);
-    // n × (f+ − f−)。n = (cosΦ, sinΦ) との2次元外積
-    double cross = c * (f_plus_y - f_minus_y) - s * (f_plus_x - f_minus_x);
-
-    // Euler–Maruyama 法による更新(model.md の無次元化SDE)
-    x += (force_x + 0.5 * (f_plus_x + f_minus_x)) * delta_t + xi.x * noise_scale;
-    y += 0.5 * (f_plus_y + f_minus_y) * delta_t + xi.y * noise_scale;
-    angle += ((torque + cross) * delta_t + 2.0 * xi_phi * noise_scale) * inv_length;
+    // 修正子: 予測状態でドリフトを評価し直し、始状態に適用する(model.md の無次元化SDE)
+    drift(spring_k, length, force_x, c_1, c_2, predicted_x, predicted_y, predicted_angle,
+          &drift_x, &drift_y, &drift_angle);
+    x += drift_x * delta_t + noise_x;
+    y += drift_y * delta_t + noise_y;
+    angle += drift_angle * delta_t + noise_angle;
   }
 
   samples[2 * idx] = start_x;

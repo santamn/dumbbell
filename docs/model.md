@@ -99,7 +99,7 @@ d\Phi_t &= \frac{1}{\tilde{l}}\left\{ 2 C_1\cos\Phi_t (1 + C_2\sin\Phi_t) + \bol
 \end{aligned}
 $$
 
-この確率微分方程式に基づいて、Euler–Maruyama 法を用いて数値シミュレーションを行う。ここで、$\boldsymbol{W}_t$ は2次元の標準ブラウン運動、$B_t$ は $\boldsymbol{W}_t$ と独立な1次元の標準ブラウン運動である。
+ここで、$\boldsymbol{W}_t$ は2次元の標準ブラウン運動、$B_t$ は $\boldsymbol{W}_t$ と独立な1次元の標準ブラウン運動である。
 
 $$
 \begin{aligned}
@@ -109,6 +109,27 @@ $$
   &\mathbb{E}\left[(dB_t)^2\right] = dt
 \end{aligned}
 $$
+
+### 数値積分: 予測子・修正子法
+
+上記のSDEは、単純な Euler–Maruyama 法ではなく予測子・修正子法によって数値積分される。壁の反発力はばね定数 $K$ が非常に大きいペナルティ法であり局所的な非線形性が強いため、ドリフト項を始点の状態だけで評価する Euler–Maruyama 法よりも、終点側の状態でドリフト項を評価し直す予測子・修正子法の方が数値的に安定する。
+
+ドリフト項をまとめて
+
+$$
+\bm{b}(\widetilde{\boldsymbol{Y}}, \Phi) \coloneqq \begin{pmatrix} \widetilde{\bm{f}} + \frac{1}{2}(\widetilde{\bm{f}}^{\text{rep}}_+ + \widetilde{\bm{f}}^{\text{rep}}_-) \\[4pt] \frac{1}{\tilde{l}}\left\{ 2 C_1\cos\Phi (1 + C_2\sin\Phi) + \boldsymbol{n} \times (\widetilde{\bm{f}}^{\text{rep}}_{+} - \widetilde{\bm{f}}^{\text{rep}}_{-}) \right\} \end{pmatrix}
+$$
+
+と表すと、時刻 $t_n$ の状態 $(\widetilde{\boldsymbol{Y}}_n, \Phi_n)$ から時刻 $t_{n+1} = t_n + \Delta t$ の状態を求める1ステップは、以下の手順で計算される。まず、その時刻の1回だけ、揺動項の増分 $\Delta \boldsymbol{W}_n \sim \mathcal{N}(\boldsymbol{0}, \Delta t\, \boldsymbol{I})$ と $\Delta B_n \sim \mathcal{N}(0, \Delta t)$ を生成する。これらは予測子・修正子の両方で使い回し、ステップ内で再生成しない。
+
+$$
+\begin{aligned}
+\text{予測子:}\quad & (\widetilde{\boldsymbol{Y}}^*, \Phi^*) = (\widetilde{\boldsymbol{Y}}_n, \Phi_n) + \bm{b}(\widetilde{\boldsymbol{Y}}_n, \Phi_n)\, \Delta t + \left(\Delta \boldsymbol{W}_n,\ \frac{2}{\tilde{l}}\Delta B_n\right) \\
+\text{修正子:}\quad & (\widetilde{\boldsymbol{Y}}_{n+1}, \Phi_{n+1}) = (\widetilde{\boldsymbol{Y}}_n, \Phi_n) + \bm{b}(\widetilde{\boldsymbol{Y}}^*, \Phi^*)\, \Delta t + \left(\Delta \boldsymbol{W}_n,\ \frac{2}{\tilde{l}}\Delta B_n\right)
+\end{aligned}
+$$
+
+すなわち、予測子でドリフト項を始点の状態 $(\widetilde{\boldsymbol{Y}}_n, \Phi_n)$ で評価して仮の終点 $(\widetilde{\boldsymbol{Y}}^*, \Phi^*)$ を求め(通常の Euler–Maruyama 法の1ステップに相当)、修正子ではそのドリフト項を仮の終点 $(\widetilde{\boldsymbol{Y}}^*, \Phi^*)$ で評価し直したうえで、改めて始点 $(\widetilde{\boldsymbol{Y}}_n, \Phi_n)$ に適用する。揺動項は状態に依存しないため、予測子・修正子のどちらでも同じ増分をそのまま用いる。
 
 ## 壁面の処理
 
